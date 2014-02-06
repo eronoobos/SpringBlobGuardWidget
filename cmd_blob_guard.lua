@@ -1,0 +1,576 @@
+function widget:GetInfo()
+	return {
+		name	= "Blob Guard",
+		desc	= "guards rather than follows vulnerable units",
+		author  = "zoggop",
+		date 	= "February 2014",
+		license	= "whatever",
+		layer 	= 0,
+		enabled	= true
+	}
+end
+
+
+
+-- LOCAL DEFINITIONS
+
+local sqrt = math.sqrt
+local random = math.random
+local pi = math.pi
+local halfPi = pi / 2
+local twicePi = pi * 2
+local cos = math.cos
+local sin = math.sin
+local atan2 = math.atan2
+local abs = math.abs
+local max = math.max
+local min = math.min
+local ceil = math.ceil
+
+local mapBuffer = 32
+local CMD_AREA_GUARD = 10125
+
+local myTeam
+local myAllies
+local blobs = {}
+local targets = {}
+local guards = {}
+local defSpeed = {}
+local defSize = {}
+local defRange = {}
+local widgetCommands = {}
+
+local sizeX = Game.mapSizeX
+local sizeZ = Game.mapSizeZ
+local bufferedSizeX = sizeX - mapBuffer
+local bufferedSizeZ = sizeZ - mapBuffer
+
+-- commands that cause guarding to stop
+local interruptCmd = {
+	[0] = true,
+	[10] = true,
+	[15] = true,
+	[16] = true,
+	[20] = true,
+	[21] = true,
+	[25] = true,
+	[40] = true,
+	[90] = true,
+	[125] = true,
+	[130] = true,
+	[140] = true,
+}
+
+
+
+--- LOCAL FUNCTIONS
+
+local function ConstrainToMap(x, z)
+	x = max(min(x, bufferedSizeX), mapBuffer)
+	z = max(min(z, bufferedSizeZ), mapBuffer)
+	return x, z
+end
+
+local function RandomAway(x, z, dist, angle)
+	if angle == nil then angle = random() * twicePi end
+	local nx = x + dist * cos(angle)
+	local nz = z - dist * sin(angle)
+	return ConstrainToMap(nx, nz)
+end
+
+local function Distance(x1, z1, x2, z2)
+	local xd = x1 - x2
+	local zd = z1 - z2
+	return sqrt(xd*xd + zd*zd)
+end
+
+local function ApplyVector(x, z, vx, vz, frames)
+	if frames == nil then frames = 30 end
+	return ConstrainToMap(x + (vx * 30), z + (vz * 30))
+end
+
+local function ManhattanDistance(x1, z1, x2, z2)
+	local xd = abs(x1 - x2)
+	local yd = abs(z1 - z2)
+	return xd + yd
+end
+
+local function Pythagorean(a, b)
+	return sqrt((a^2) + (b^2))
+end
+
+local function GetLongestWeaponRange(unitDefID)
+	local weaponRange = 0
+	local unitDef = UnitDefs[unitDefID]
+	local weapons = unitDef["weapons"]
+	for i=1, #weapons do
+		local weaponDefID = weapons[i]["weaponDef"]
+		local weaponDef = WeaponDefs[weaponDefID]
+		if weaponDef["range"] > weaponRange then
+			weaponRange = weaponDef["range"]
+		end
+	end
+	return weaponRange
+end
+
+local function GetUnitDefInfo()
+	local speeds = {}
+	local types = {}
+	local sizes = {}
+	local ranges = {}
+	for uDefID, uDef in pairs(UnitDefs) do
+		speeds[uDefID] = uDef.speed
+		local x = uDef.xsize * 8
+		local z = uDef.zsize * 8
+		sizes[uDefID] = ceil(Pythagorean(x, z))
+		ranges[uDefID] = GetLongestWeaponRange(uDefID)
+	end
+	return speeds, sizes, ranges
+end
+
+local function GiveCommand(unitID, cmdID, cmdParams)
+	local command = Spring.GiveOrderToUnit(unitID, cmdID, cmdParams, {})
+	if command == true then
+		local cmd = { unitID = unitID, cmdID = cmdID, cmdParams = cmdParams }
+		table.insert(widgetCommands, cmd)
+	end
+end
+
+local function SetGuardMoveState(guard, moveState)
+	if guard.moveState ~= moveState then
+		Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {moveState}, {})
+		guard.moveState = moveState
+	end
+end
+
+local function CreateGuard(unitID)
+	local defID = Spring.GetUnitDefID(unitID)
+	local uDef = UnitDefs[defID]
+	local states = Spring.GetUnitStates(unitID)
+	local guard = { unitID = unitID, blobs = {}, initialMoveState = states["movestate"], moveState = states["movestate"], speed = defSpeed[defID], size = defSize[defID], range = defRange[defID], canMove = uDef.canMove, canAttack = uDef.canAttack, canAssist = uDef.canAssist, canRepair = uDef.canRepair, canFly = uDef.canFly }
+	if guard.canAttack and not guard.canFly and not guard.canAssist and not guard.canRepair then
+		guard.isCombatant = true
+	end
+	guards[unitID] = guard
+	return guard
+end
+
+local function CreateTarget(unitID)
+	local defID = Spring.GetUnitDefID(unitID)
+	local target = { unitID = unitID, blobs = {}, size = defSize[defID] }
+	targets[unitID] = target
+	return target
+end
+
+local function CreateBlob(guardList, targetList)
+	local blob = { guards = {}, targets = {}, guardDistance = 100, canAssist = 0, canRepair = 0 }
+	for i, unitID in pairs(guardList) do
+		local guard = guards[unitID]
+		if guard == nil then guard = CreateGuard(unitID) end
+		table.insert(guard.blobs, blob)
+		table.insert(blob.guards, guard)
+		if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
+		if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
+	end
+	for i, unitID in pairs(targetList) do
+		local target = targets[unitID]
+		if target == nil then target = CreateTarget(unitID) end
+		table.insert(target.blobs, blob)
+		table.insert(blob.targets, target)
+	end
+	table.insert(blobs, blob)
+end
+
+local function CreateMonoBlob(guardID, targetID)
+	local target = targets[targetID]
+	local blob
+	if target then
+		for bi, targetBlob in pairs(target.blobs) do
+			if #targetBlob.targets == 1 then
+				blob = targetBlob
+				break
+			end
+		end
+	end
+	if blob == nil then
+		CreateBlob({guardID}, {targetID})
+	else
+		local guard = guards[unitID]
+		if guard == nil then guard = CreateGuard(guardID) end
+		table.insert(guard.blobs, blob)
+		table.insert(blob.guards, guard)
+		if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
+		if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
+	end
+end
+
+local function ClearTarget(unitID)
+	local target = targets[unitID]
+	if target == nil then return false end
+	for bi, blob in pairs(target.blobs) do
+		for ti, blobTarget in pairs(blob.targets) do
+			if blobTarget == target then
+				table.remove(blob.targets, ti)
+				break
+			end
+		end
+		if #blob.targets == 0 then
+			table.remove(blobs, bi)
+		end
+	end
+end
+
+local function ClearGuard(unitID)
+	local guard = guards[unitID]
+	if guard == nil then return false end
+	for bi, blob in pairs(guard.blobs) do
+		for gi, blobGuard in pairs(blob.guards) do
+			if blobGuard == guard then
+				if guard.canAssist then blob.canAssist = blob.canAssist - 1 end
+				if guard.canRepair then blob.canRepair = blob.canRepair - 1 end
+				if guard.angle then blob.needSlotting = true end
+				Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {guard.initialMoveState}, {})
+				table.remove(blob.guards, gi)
+				break
+			end
+		end
+		if #blob.guards == 0 then
+			table.remove(blobs, bi)
+		end
+	end
+	guards[unitID] = nil
+end
+
+local function ClearGuards(guardList)
+	for i, unitID in pairs(guardList) do
+		ClearGuard(unitID)
+	end
+end
+
+local function GetAllies(myTeam)
+	local info = { Spring.GetTeamInfo(myTeam) }
+	local allyID = info[6]
+	local allyTeams = Spring.GetTeamList(allyID)
+	return allyTeams
+end
+
+local function AssessTargets(blob)
+	blob.needsAssist = {}
+	blob.needsRepair = {}
+	local minX = 100000
+	local maxX = -100000
+	local minZ = 100000
+	local maxZ = -100000
+	local totalVX = 0
+	local totalVZ = 0
+	local maxVectorSize = 0
+	local moreThanOne = #blob.targets > 1
+	for ti, target in pairs(blob.targets) do
+		local unitID = target.unitID
+		if blob.canAssist > 0 then
+			local constructing = Spring.GetUnitIsBuilding(unitID)
+			if constructing then table.insert(blob.needsAssist, unitID) end
+		end
+		if blob.canRepair > 0 then
+			local health, maxHealth = Spring.GetUnitHealth(unitID)
+			if health < maxHealth then table.insert(blob.needsRepair, unitID) end
+		end
+		if moreThanOne then
+			local ux, uy, uz = Spring.GetUnitPosition(unitID)
+			if ux > maxX then maxX = ux end
+			if ux < minX then minX = ux end
+			if uz > maxZ then maxZ = uz end
+			if uz < minZ then minZ = uz end
+			local vx, vy, vz = Spring.GetUnitVelocity(unitID)
+			totalVX = totalVX + vx
+			totalVZ = totalVZ + vz
+			local vectorSize = Pythagorean(vx, vz)
+			if vectorSize > maxVectorSize then maxVectorSize = vectorSize end
+		end
+	end
+	if moreThanOne then
+		blob.vx = totalVX / #blob.targets
+		blob.vz = totalVZ / #blob.targets
+		blob.speed = maxVectorSize * 30
+		local dx = maxX - minX
+		local dz = maxZ - minZ
+		blob.radius = max(dx, dz) / 2
+		blob.x = (maxX + minX) / 2
+		blob.z = (maxZ + minZ) / 2
+	else
+		blob.x, blob.y, blob.z = Spring.GetUnitPosition(blob.targets[1].unitID)
+		blob.vx, blob.vy, blob.vz = Spring.GetUnitVelocity(blob.targets[1].unitID)
+		blob.radius = blob.targets[1].size / 2
+		blob.speed = Pythagorean(blob.vx, blob.vz)
+	end
+	blob.x, blob.z = ApplyVector(blob.x, blob.z, blob.vx, blob.vz)
+	blob.y = Spring.GetGroundHeight(blob.x, blob.z)
+end
+
+local function WhoNeedsSlotting(blob)
+	blob.slotThese = {}
+	for gi, guard in pairs(blob.guards) do
+		local unitID = guard.unitID
+		if guard.isCombatant and guard.speed > blob.speed then
+			local gx, gy, gz = Spring.GetUnitPosition(unitID)
+			guard.x, guard.y, guard.z = gx, gy, gz
+			local dist = Distance(blob.x, blob.z, gx, gz)
+			if dist > blob.radius + (blob.guardDistance * 3) then
+				if #blob.targets == 1 then
+					if not guard.guarding then
+						GiveCommand(guard.unitID, CMD.GUARD, {blob.targets[1].unitID})
+						guard.guarding = true
+					end
+				else
+					guard.guarding = nil
+					GiveCommand(guard.unitID, CMD.MOVE, {blob.x, blob.y, blob.z})
+				end
+				SetGuardMoveState(guard, 0)
+				if guard.angle then blob.needSlotting = true end
+				guard.angle = nil
+			else
+				guard.guarding = nil
+				if guard.angle == nil then blob.needSlotting = true end
+				if blob.underFire then
+					SetGuardMoveState(guard, 2)
+				else
+					SetGuardMoveState(guard, 1)
+				end
+				table.insert(blob.slotThese, guard)
+			end
+		end
+	end
+end
+
+local function AssignSlots(blob)
+	-- find angle slots if needed and move units to them
+	local divisor = #blob.slotThese
+	local guardCircumfrence = 0
+	if divisor > 0 then
+		local angles
+		if divisor < 3 and (blob.lastVX ~= blob.vx or blob.lastVZ ~= blob.vz) then blob.needSlotting = true end -- one or two guards should guard in front of unit first
+		if blob.needSlotting then
+			local angleAdd = twicePi / divisor
+			local angle
+			if divisor < 3 and (blob.speed > 0) then 
+				 -- one or two guards should guard in front of unit first
+				angle = atan2(-blob.vz, blob.vx)
+				blob.lastAngle = angle
+			elseif blob.lastAngle then
+				angle = blob.lastAngle
+			else
+				angle = random() * twicePi
+				blob.lastAngle = angle
+			end
+			angles = {}
+			for i = 1, divisor do
+				local a = angle + (angleAdd * (i - 1))
+				if a > twicePi then a = a - twicePi end 
+				table.insert(angles, a)
+			end
+		end
+		local guardDist = blob.radius + blob.guardDistance
+		if blob.underFire then guardDist = blob.radius + (blob.guardDistance * 0.5) end
+		for gi, guard in pairs(blob.slotThese) do
+			local attacking
+			local cmdQueue = Spring.GetUnitCommands(guard.unitID, 1)
+			if cmdQueue[1] then
+				if cmdQueue[1].id == CMD.ATTACK then attacking = true end
+			end
+			local maxDist = guard.size * 0.5
+			if attacking then
+				if blob.underFire then
+					maxDist = ((guard.range * 0.5) + guard.speed) * 0.5
+				else
+					maxDist = ((guard.range * 0.5) + guard.speed)
+				end
+			end
+			if blob.needSlotting then
+				guardCircumfrence = guardCircumfrence + guard.size
+				local bestAngle
+				if guard.angle == nil then
+					local leastDist = 1000
+					for ai, a in pairs(angles) do
+						local mx, mz = RandomAway(blob.x, blob.z, guardDist, a)
+						local slotDist = Distance(guard.x, guard.z, mx, mz)
+						if slotDist < leastDist then
+							leastDist = slotDist
+							bestAngle = ai
+						end
+					end
+				else
+					local leastDist = twicePi
+					for ai, a in pairs(angles) do
+						local angleDist
+						if a > pi and guard.angle < pi then
+							angleDist = (a - pi) + guard.angle
+						elseif a < pi and guard.angle > pi then
+							angleDist = a + (guard.angle - pi)
+						else
+							angleDist = abs(a - guard.angle)
+						end
+						if angleDist < leastDist then
+							leastDist = angleDist
+							bestAngle = ai
+						end
+					end
+				end
+				if bestAngle then
+					guard.angle = table.remove(angles, bestAngle)
+				else
+					guard.angle = table.remove(angles)
+				end
+			end
+			-- move into position if needed
+			local mx, mz = RandomAway(blob.x, blob.z, guardDist, guard.angle)
+			local slotDist = Distance(guard.x, guard.z, mx, mz)
+			if slotDist > maxDist then
+				local my = Spring.GetGroundHeight(mx, mz)
+				GiveCommand(guard.unitID, CMD.MOVE, {mx, my, mz})
+			end
+		end
+	end
+	if blob.needSlotting then
+		blob.guardDistance = blob.radius + max(100, ceil(guardCircumfrence / 7.5))
+	end
+	blob.needSlotting = false
+	blob.lastVX = blob.vx
+	blob.lastVZ = blob.vz
+end
+
+local function AssignAssist(blob)
+
+end
+
+local function AssignRepair(blob)
+
+end
+
+local function AssignRemaining(blob)
+
+end
+
+
+
+-- SPRING CALLINS
+
+--[[
+function widget:CommandsChanged()
+	local customCommands = widgetHandler.customCommands
+	table.insert(customCommands, {			
+		id      = CMD_AREA_GUARD,
+		type    = CMDTYPE.ICON_AREA,
+		tooltip = 'Define an area within which to guard all units',
+		name    = 'Area Guard',
+		cursor  = 'Guard',
+		action  = 'areaguard',
+	})
+end
+]]--
+
+function widget:Initialize()
+	defSpeed, defSize, defRange = GetUnitDefInfo()
+	myTeam = Spring.GetMyTeamID()
+	myAllies = GetAllies(myTeam)
+end
+
+function widget:CommandNotify(cmdID, cmdParams, cmdOpts)
+	if not interruptCmd[cmdID] then return end
+	local selected = Spring.GetSelectedUnits()
+	if #selected == 0 then return end
+	local targetted
+	if cmdID == CMD_AREA_GUARD then
+		local cx, cy, cz, cr = cmdParams[1], cmdParams[2], cmdParams[3], cmdParams[4]
+		-- find all units in area
+		targetted = {}
+		for i, team in pairs(myAllies) do
+			local units = Spring.GetUnitsInCylinder(cx, cz, cr, team)
+			for i, unitID in pairs(units) do
+				table.insert(targetted, unitID)
+			end
+		end
+	end
+	if targetted ~= nil then
+		if #targetted > 0 then 
+			local clearCurrent = true
+			for i, opt in pairs(cmdOpts) do
+				if opt == CMD.OPT_SHIFT then
+					clearCurrent = false
+				end
+			end
+			if clearCurrent then ClearGuards(selected) end
+			CreateBlob(selected, targetted)
+		end
+	end
+end
+
+function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdOpts, cmdParams, cmdTag)
+	if not interruptCmd[cmdID] then return end
+	-- check if this is a command issued from this widget
+	for ci, cmd in pairs(widgetCommands) do
+		if unitID == cmd.unitID and cmdID == cmd.cmdID then
+			local paramsMatch = true
+			for pi, param in pairs(cmdParams) do
+				if cmd.cmdParams[pi] ~= param then
+					paramsMatch = false
+					break
+				end
+			end
+			if paramsMatch then
+				table.remove(widgetCommands, ci)
+				return
+			end
+		end
+	end
+	-- below is not a widget command
+	if cmdID == CMD.GUARD then
+		CreateMonoBlob(unitID, cmdParams[1])
+	else
+		if guards[unitID] then ClearGuard(unitID) end
+	end
+end
+
+function widget:UnitDestroyed(unitID, unitDefID, teamID, attackerID, attackerDefID, attackerTeamID)
+	if guards[unitID] then ClearGuard(unitID) end
+	if targets[unitID] then ClearTarget(unitID) end
+end
+
+function widget:UnitTaken(unitID, unitDefID, unitTeam, newTeam)
+	if guards[unitID] then
+		ClearGuard(unitID)
+	end
+end
+
+function widget:GameFrame(gameFrame)
+	if gameFrame % 30 == 0 then
+		for bi, blob in pairs(blobs) do
+			if blob.underFire ~= nil then
+				-- blob is no longer under fire after 5 seconds
+				if gameFrame > blob.underFire + 150 then
+					blob.underFire = nil
+				end
+			end
+			-- find blob position and minimum blob radius and who needs repair and assisting
+			AssessTargets(blob)
+			-- find which guards need to be slotted in a circle
+			WhoNeedsSlotting(blob)
+			AssignSlots(blob)
+			AssignAssist(blob)
+			AssignRepair(blob)
+			AssignRemaining(blob)
+		end
+	end
+end
+
+function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+	if guards[unitID] then
+		for bi, blob in pairs(guards[unitID].blobs) do
+			blob.underFire = Spring.GetGameFrame()
+		end
+	end
+	if targets[unitID] then
+		for bi, blob in pairs(targets[unitID].blobs) do
+			blob.underFire = Spring.GetGameFrame()
+		end
+	end
+end
