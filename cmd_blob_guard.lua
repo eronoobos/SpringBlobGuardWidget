@@ -1,7 +1,7 @@
 function widget:GetInfo()
 	return {
 		name	= "Blob Guard",
-		desc	= "guards rather than follows vulnerable units",
+		desc	= "guards multiple units",
 		author  = "zoggop",
 		date 	= "February 2014",
 		license	= "whatever",
