@@ -135,6 +135,11 @@ local function GiveCommand(unitID, cmdID, cmdParams)
 	if command == true then
 		local cmd = { unitID = unitID, cmdID = cmdID, cmdParams = cmdParams }
 		table.insert(widgetCommands, cmd)
+		if (cmdID == CMD.GUARD or cmdID == CMD.REPAIR) and #cmdParams == 1 then
+			-- what guard is guarding or repairing
+			local guard = guards[unitID]
+			if guard then guard.targetID = cmdParams[1] end
+		end
 	end
 end
 
@@ -298,7 +303,7 @@ local function GetAllies(myTeam)
 	return allyTeams
 end
 
-local function AssessTargets(blob)
+local function EvaluateTargets(blob)
 	blob.needsAssist = {}
 	blob.needsRepair = {}
 	local minX = 100000
@@ -312,12 +317,13 @@ local function AssessTargets(blob)
 	for ti, target in pairs(blob.targets) do
 		local unitID = target.unitID
 		if blob.canAssist > 0 then
-			local constructing = Spring.GetUnitIsBuilding(unitID)
-			if constructing then table.insert(blob.needsAssist, unitID) end
+			target.constructing = Spring.GetUnitIsBuilding(unitID)
+			if target.constructing then table.insert(blob.needsAssist, unitID) end
 		end
 		if blob.canRepair > 0 then
 			local health, maxHealth = Spring.GetUnitHealth(unitID)
-			if health < maxHealth then table.insert(blob.needsRepair, unitID) end
+			target.damaged = health < maxHealth
+			if target.damaged then table.insert(blob.needsRepair, unitID) end
 		end
 		if moreThanOne then
 			local ux, uy, uz = Spring.GetUnitPosition(unitID)
@@ -351,7 +357,7 @@ local function AssessTargets(blob)
 	blob.y = Spring.GetGroundHeight(blob.x, blob.z)
 end
 
-local function WhoNeedsSlotting(blob)
+local function EvaluateGuards(blob)
 	blob.slotThese = {}
 	blob.willAssist = {}
 	blob.willRepair = {}
@@ -385,17 +391,28 @@ local function WhoNeedsSlotting(blob)
 				end
 				table.insert(blob.slotThese, guard)
 			end
-		elseif guard.canAssist and #blob.needsAssist > 0 then
-			table.insert(blob.willAssist, guard)
 		elseif guard.canRepair and #blob.needsRepair > 0 then
-			table.insert(blob.willRepair, guard)
+			local repair = true
+			local target = targets[guard.targetID]
+			if target then
+				if target.damaged then repair = false end
+			end
+			if repair then table.insert(blob.willRepair, guard) end
+		elseif guard.canAssist and #blob.needsAssist > 0 then
+			local assist = true
+			local target = targets[guard.targetID]
+			if target then
+				if target.constructing then assist = false end
+			end
+			if assist then table.insert(blob.willAssist, guard) end
 		else
-			table.insert(blob.willGuard, guard)
+			local target = targets[guard.targetID]
+			if not target then table.insert(blob.willGuard, guard) end
 		end
 	end
 end
 
-local function AssignSlots(blob)
+local function AssignCombat(blob)
 	-- find angle slots if needed and move units to them
 	local divisor = #blob.slotThese
 	local guardCircumfrence = 0
@@ -639,11 +656,9 @@ function widget:GameFrame(gameFrame)
 					blob.underFire = nil
 				end
 			end
-			-- find blob position and minimum blob radius and who needs repair and assisting
-			AssessTargets(blob)
-			-- find which guards need to be slotted in a circle
-			WhoNeedsSlotting(blob)
-			AssignSlots(blob)
+			EvaluateTargets(blob) -- find blob position and minimum blob radius and who needs repair and assisting
+			EvaluateGuards(blob) -- find which guards need to do what
+			AssignCombat(blob) -- put combatant guards into circle slots
 			AssignAssist(blob)
 			AssignRepair(blob)
 			AssignRemaining(blob)
