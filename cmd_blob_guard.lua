@@ -6,7 +6,8 @@ function widget:GetInfo()
 		date 	= "February 2014",
 		license	= "whatever",
 		layer 	= 0,
-		enabled	= true
+		enabled	= true,
+		handler = true,
 	}
 end
 
@@ -59,6 +60,7 @@ local interruptCmd = {
 	[125] = true,
 	[130] = true,
 	[140] = true,
+	[CMD_AREA_GUARD] = true,
 }
 
 
@@ -163,22 +165,64 @@ local function CreateTarget(unitID)
 end
 
 local function CreateBlob(guardList, targetList)
-	local blob = { guards = {}, targets = {}, guardDistance = 100, canAssist = 0, canRepair = 0 }
-	for i, unitID in pairs(guardList) do
-		local guard = guards[unitID]
-		if guard == nil then guard = CreateGuard(unitID) end
-		table.insert(guard.blobs, blob)
-		table.insert(blob.guards, guard)
-		if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
-		if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
-	end
+	-- check for targets that are guards here
+	local theseGuards = {}
+	local theseTargets = {}
+	local totalTargets = 0
+	for i, unitID in pairs(guardList) do theseGuards[unitID] = true end
 	for i, unitID in pairs(targetList) do
-		local target = targets[unitID]
-		if target == nil then target = CreateTarget(unitID) end
-		table.insert(target.blobs, blob)
-		table.insert(blob.targets, target)
+		if not theseGuards[unitID] then
+			theseTargets[unitID] = true
+			totalTargets = totalTargets + 1
+		end
 	end
-	table.insert(blobs, blob)
+	if totalTargets == 0 then return end
+	-- check for duplicate blob
+	local dupeBlob
+	for bi, blob in pairs(blobs) do
+		if #blob.targets == totalTargets then
+			local dupe = true
+			for ti, target in pairs(blob.targets) do
+				if not theseTargets[target.unitID] then
+					dupe = false
+					break
+				end
+			end
+			if dupe then
+				dupeBlob = blob
+				break
+			end
+		end
+	end
+	local blob = dupeBlob or { guards = {}, targets = {}, guardDistance = 100, canAssist = 0, canRepair = 0 }
+	-- check for duplicate guards within the duplicate blob
+	local dupeGuards = {}
+	if dupeBlob then
+		for gi, guard in pairs(blob.guards) do
+			if theseGuards[guard.unitID] then dupeGuards[unitID] = true end
+		end
+	end
+	if #dupeGuards ~= #guardList then
+		for i, unitID in pairs(guardList) do
+			if not dupeGuards[unitID] then
+				local guard = guards[unitID]
+				if guard == nil then guard = CreateGuard(unitID) end
+				table.insert(guard.blobs, blob)
+				table.insert(blob.guards, guard)
+				if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
+				if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
+			end
+		end
+	end
+	if not dupeBlob then
+		for unitID, nothing in pairs(theseTargets) do
+			local target = targets[unitID]
+			if target == nil then target = CreateTarget(unitID) end
+			table.insert(target.blobs, blob)
+			table.insert(blob.targets, target)
+		end
+		table.insert(blobs, blob)
+	end
 end
 
 local function CreateMonoBlob(guardID, targetID)
@@ -454,19 +498,17 @@ end
 
 -- SPRING CALLINS
 
---[[
 function widget:CommandsChanged()
 	local customCommands = widgetHandler.customCommands
 	table.insert(customCommands, {			
 		id      = CMD_AREA_GUARD,
 		type    = CMDTYPE.ICON_AREA,
 		tooltip = 'Define an area within which to guard all units',
-		name    = 'Area Guard',
+		name    = 'AreaGuard',
 		cursor  = 'Guard',
 		action  = 'areaguard',
 	})
 end
-]]--
 
 function widget:Initialize()
 	defSpeed, defSize, defRange = GetUnitDefInfo()
@@ -524,8 +566,13 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdOpts, cmdPara
 	end
 	-- below is not a widget command
 	if cmdID == CMD.GUARD then
+		local clearCurrent = true
+		if cmdOpts == CMD.OPT_SHIFT then
+			clearCurrent = false
+		end
+		if clearCurrent then ClearGuard(unitID) end
 		CreateMonoBlob(unitID, cmdParams[1])
-	else
+	elseif cmdID ~= CMD_AREA_GUARD then
 		if guards[unitID] then ClearGuard(unitID) end
 	end
 end
