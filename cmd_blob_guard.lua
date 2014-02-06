@@ -353,6 +353,9 @@ end
 
 local function WhoNeedsSlotting(blob)
 	blob.slotThese = {}
+	blob.willAssist = {}
+	blob.willRepair = {}
+	blob.willGuard = {}
 	for gi, guard in pairs(blob.guards) do
 		local unitID = guard.unitID
 		if guard.isCombatant and guard.speed > blob.speed then
@@ -382,6 +385,12 @@ local function WhoNeedsSlotting(blob)
 				end
 				table.insert(blob.slotThese, guard)
 			end
+		elseif guard.canAssist and #blob.needsAssist > 0 then
+			table.insert(blob.willAssist, guard)
+		elseif guard.canRepair and #blob.needsRepair > 0 then
+			table.insert(blob.willRepair, guard)
+		else
+			table.insert(blob.willGuard, guard)
 		end
 	end
 end
@@ -483,15 +492,48 @@ local function AssignSlots(blob)
 end
 
 local function AssignAssist(blob)
-
+	if #blob.needsAssist == 0 or #blob.willAssist == 0 then return end
+	local quota = 1
+	if #blob.needsAssist == 1 then
+		quota = #blob.willAssist
+	else
+		quota = math.floor(#blob.needsAssist / #blob.willAssist)
+	end
+	for ti, unitID in pairs(blob.needsAssist) do
+		if ti == #blob.needsAssist then quota = #blob.willAssist end
+		for i = 1, quota do
+			local guard = table.remove(blob.willAssist)
+			GiveCommand(guard.unitID, CMD.GUARD, {unitID})
+		end
+		if #blob.willAssist == 0 then break end
+	end
 end
 
 local function AssignRepair(blob)
-
+	if #blob.needsRepair == 0 or #blob.willRepair == 0 then return end
+	local quota = 1
+	if #blob.needsRepair == 1 then
+		quota = #blob.willRepair
+	else
+		quota = math.floor(#blob.needsRepair / #blob.willRepair)
+	end
+	for ti, unitID in pairs(blob.needsRepair) do
+		if ti == #blob.needsRepair then quota = #blob.willRepair end
+		for i = 1, quota do
+			local guard = table.remove(blob.willRepair)
+			GiveCommand(guard.unitID, CMD.REPAIR, {unitID})
+		end
+		if #blob.willRepair == 0 then break end
+	end
 end
 
 local function AssignRemaining(blob)
-
+	if #blob.willGuard == 0 then return end
+	for gi, guard in pairs(blob.willGuard) do
+		local ti = random(1, #blob.targets)
+		local unitID = blob.targets[ti].unitID
+		GiveCommand(guard.unitID, CMD.GUARD, {unitID})
+	end
 end
 
 
