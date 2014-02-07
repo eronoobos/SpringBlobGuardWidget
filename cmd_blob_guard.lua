@@ -505,6 +505,10 @@ local function AssignCombat(blob)
 				blob.lastAngle = angle
 			elseif blob.lastAngle then
 				angle = blob.lastAngle
+			elseif #blob.slotted > 0 then
+				-- grab an angle from an already slotted guard
+				angle = blob.slotted[1].angle
+				blob.lastAngle = angle
 			else
 				angle = random() * twicePi
 				blob.lastAngle = angle
