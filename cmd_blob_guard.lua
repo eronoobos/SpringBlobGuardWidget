@@ -166,7 +166,7 @@ local function CreateGuard(unitID)
 	local defID = Spring.GetUnitDefID(unitID)
 	local uDef = UnitDefs[defID]
 	local states = Spring.GetUnitStates(unitID)
-	local guard = { unitID = unitID, blobs = {}, initialMoveState = states["movestate"], moveState = states["movestate"], speed = defSpeed[defID], size = defSize[defID], range = defRange[defID], canMove = uDef.canMove, canAttack = uDef.canAttack, canAssist = uDef.canAssist, canRepair = uDef.canRepair, canFly = uDef.canFly }
+	local guard = { unitID = unitID, initialMoveState = states["movestate"], moveState = states["movestate"], speed = defSpeed[defID], size = defSize[defID], range = defRange[defID], canMove = uDef.canMove, canAttack = uDef.canAttack, canAssist = uDef.canAssist, canRepair = uDef.canRepair, canFly = uDef.canFly }
 	if guard.canAttack and not guard.canFly and not guard.canAssist and not guard.canRepair then
 		guard.isCombatant = true
 	end
@@ -176,128 +176,58 @@ end
 
 local function CreateTarget(unitID)
 	local defID = Spring.GetUnitDefID(unitID)
-	local target = { unitID = unitID, blobs = {}, size = defSize[defID] }
+	local target = { unitID = unitID, size = defSize[defID] }
 	targets[unitID] = target
 	return target
 end
 
-local function CreateBlob(guardList, targetList)
-	-- check for targets that are guards here
-	local theseGuards = {}
-	local theseTargets = {}
-	local totalTargets = 0
-	for i, unitID in pairs(guardList) do theseGuards[unitID] = true end
-	for i, unitID in pairs(targetList) do
-		if not theseGuards[unitID] then
-			theseTargets[unitID] = true
-			totalTargets = totalTargets + 1
-		end
+local function ClearBlob(blob)
+	for ti, target in pairs(blob.targets) do
+		targets[target.unitID] = nil
 	end
-	if totalTargets == 0 then return end
-	-- check for duplicate blob
-	local dupeBlob
-	for bi, blob in pairs(blobs) do
-		if #blob.targets == totalTargets then
-			local dupe = true
-			for ti, target in pairs(blob.targets) do
-				if not theseTargets[target.unitID] then
-					dupe = false
-					break
-				end
-			end
-			if dupe then
-				dupeBlob = blob
-				break
-			end
-		end
+	for gi, guard in pairs(blob.guards) do
+		guards[guard.unitID] = nil
 	end
-	local blob = dupeBlob or { guards = {}, targets = {}, guardDistance = 100, canAssist = 0, canRepair = 0 }
-	-- check for duplicate guards within the duplicate blob
-	local dupeGuards = {}
-	if dupeBlob then
-		for gi, guard in pairs(blob.guards) do
-			if theseGuards[guard.unitID] then dupeGuards[unitID] = true end
+	for bi, checkBlob in pairs(blobs) do
+		if checkBlob == blob then
+			table.remove(blobs, bi)
+			break
 		end
-	end
-	if #dupeGuards ~= #guardList then
-		for i, unitID in pairs(guardList) do
-			if not dupeGuards[unitID] then
-				local guard = guards[unitID]
-				if guard == nil then guard = CreateGuard(unitID) end
-				table.insert(guard.blobs, blob)
-				table.insert(blob.guards, guard)
-				if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
-				if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
-			end
-		end
-	end
-	if not dupeBlob then
-		for unitID, nothing in pairs(theseTargets) do
-			local target = targets[unitID]
-			if target == nil then target = CreateTarget(unitID) end
-			table.insert(target.blobs, blob)
-			table.insert(blob.targets, target)
-		end
-		table.insert(blobs, blob)
-	end
-end
-
-local function CreateMonoBlob(guardID, targetID)
-	local target = targets[targetID]
-	local blob
-	if target then
-		for bi, targetBlob in pairs(target.blobs) do
-			if #targetBlob.targets == 1 then
-				blob = targetBlob
-				break
-			end
-		end
-	end
-	if blob == nil then
-		CreateBlob({guardID}, {targetID})
-	else
-		local guard = guards[unitID]
-		if guard == nil then guard = CreateGuard(guardID) end
-		table.insert(guard.blobs, blob)
-		table.insert(blob.guards, guard)
-		if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
-		if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
 	end
 end
 
 local function ClearTarget(unitID)
 	local target = targets[unitID]
-	if target == nil then return false end
-	for bi, blob in pairs(target.blobs) do
-		for ti, blobTarget in pairs(blob.targets) do
-			if blobTarget == target then
-				table.remove(blob.targets, ti)
-				break
-			end
-		end
-		if #blob.targets == 0 then
-			table.remove(blobs, bi)
+	if target == nil then return end
+	local blob = target.blob
+	for ti, blobTarget in pairs(blob.targets) do
+		if blobTarget == target then
+			table.remove(blob.targets, ti)
+			break
 		end
 	end
+	if #blob.targets == 0 then
+		ClearBlob(blob)
+	end
+	targets[unitID] = nil
 end
 
 local function ClearGuard(unitID)
 	local guard = guards[unitID]
 	if guard == nil then return false end
-	for bi, blob in pairs(guard.blobs) do
-		for gi, blobGuard in pairs(blob.guards) do
-			if blobGuard == guard then
-				if guard.canAssist then blob.canAssist = blob.canAssist - 1 end
-				if guard.canRepair then blob.canRepair = blob.canRepair - 1 end
-				if guard.angle then blob.needSlotting = true end
-				Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {guard.initialMoveState}, {})
-				table.remove(blob.guards, gi)
-				break
-			end
+	local blob = guard.blob
+	for gi, blobGuard in pairs(blob.guards) do
+		if blobGuard == guard then
+			if guard.canAssist then blob.canAssist = blob.canAssist - 1 end
+			if guard.canRepair then blob.canRepair = blob.canRepair - 1 end
+			if guard.angle then blob.needSlotting = true end
+			Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {guard.initialMoveState}, {})
+			table.remove(blob.guards, gi)
+			break
 		end
-		if #blob.guards == 0 then
-			table.remove(blobs, bi)
-		end
+	end
+	if #blob.guards == 0 then
+		ClearBlob(blob)
 	end
 	guards[unitID] = nil
 end
@@ -305,6 +235,106 @@ end
 local function ClearGuards(guardList)
 	for i, unitID in pairs(guardList) do
 		ClearGuard(unitID)
+	end
+end
+
+local function CreateBlob(guardList, targetList)
+	-- check for targets that are guards here
+	local theseGuards = {}
+	local theseNewTargets = {}
+	local overlapBlob
+	local totalTargets = 0
+	local totalNewTargets = 0
+	for i, unitID in pairs(guardList) do theseGuards[unitID] = true end
+	for i, unitID in pairs(targetList) do
+		if not theseGuards[unitID] then
+			-- make sure this target isn't guarding our guards and clear it if it is
+			local guard = guards[unitID]
+			local targetIsGuardingUs
+			if guard then
+				for ti, t in pairs(guard.blob.targets) do
+					if theseGuards[t.unitID] then
+						targetIsGuardingUs = true
+					end
+				end
+			end
+			if targetIsGuardingUs then ClearGuard(unitID) end
+			local target = targets[unitID]
+			if target then
+				overlapBlob = target.blob
+			else
+				theseNewTargets[unitID] = true
+				totalNewTargets = totalNewTargets + 1
+			end
+			totalTargets = totalTargets + 1
+		end
+	end
+	if totalTargets == 0 then return end
+	local dupeGuards = {}
+	if overlapBlob then
+		-- make sure our guards aren't targets in the blob we're merging with
+		for i, unitID in pairs(guardList) do
+			local target = targets[unitID]
+			if target then
+				if target.blob == overlapBlob then
+					ClearTarget(unitID)
+					if #overlapBlob.targets == 0 then
+						ClearBlob(overlapBlob)
+						break
+					end
+				end
+			end
+		end
+	end
+	if overlapBlob then
+		-- check for duplicate guards on the overlap blob
+		-- and check for guards in the overlap blob that are set as targets here
+		for gi, guard in pairs(overlapBlob.guards) do
+			if theseGuards[guard.unitID] then
+				dupeGuards[guard.unitID] = true
+				totalDupeGuards = totalDupeGuards + 1
+			elseif theseNewTargets[guard.unitID] then
+				ClearGuard(guard.unitID)
+				if #overlapBlob.guards == 0 then
+					ClearBlob(overlapBlob)
+				end
+			end
+		end
+	end
+	local blob = overlapBlob or { guards = {}, targets = {}, guardDistance = 100, canAssist = 0, canRepair = 0 }
+	if totalDupeGuards ~= #guardList then
+		-- if all the guards aren't already on the blob, add them
+		for i, unitID in pairs(guardList) do
+			if not dupeGuards[unitID] then
+				local guard = guards[unitID] or CreateGuard(unitID)
+				guard.blob = blob
+				table.insert(blob.guards, guard)
+				if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
+				if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
+			end
+		end
+	end
+	for unitID, nothing in pairs(theseNewTargets) do
+		local target = targets[unitID] or CreateTarget(unitID)
+		target.blob = blob
+		table.insert(blob.targets, target)
+	end
+	if not overlapBlob then table.insert(blobs, blob) end
+end
+
+local function CreateMonoBlob(guardID, targetID)
+	local target = targets[targetID]
+	local blob
+	if target then
+		blob = target.blob
+		ClearGuard(guardID)
+		local guard = CreateGuard(guardID)
+		guard.blob = blob
+		table.insert(blob.guards, guard)
+		if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
+		if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
+	else
+		blob = CreateBlob({guardID}, {targetID})
 	end
 end
 
@@ -701,15 +731,13 @@ function widget:GameFrame(gameFrame)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
-	if guards[unitID] then
-		for bi, blob in pairs(guards[unitID].blobs) do
-			blob.underFire = Spring.GetGameFrame()
-		end
+	local guard = guards[unitID]
+	if guard then
+		guard.blob.underFire = Spring.GetGameFrame()
 	end
-	if targets[unitID] then
-		for bi, blob in pairs(targets[unitID].blobs) do
-			blob.underFire = Spring.GetGameFrame()
-		end
+	local target = targets[unitID]
+	if target then
+		target.blob.underFire = Spring.GetGameFrame()
 	end
 end
 
@@ -722,11 +750,11 @@ function widget:DrawWorldPreUnit()
 	local framesSince = gameFrame - lastCalcFrame
 	local divisor = 60 - framesSince
 	gl.PushMatrix()
-	-- gl.DepthTest(true)
+	gl.DepthTest(true)
 	gl.LineWidth(3)
 	gl.Color(0, 0, 1, 0.33)
 	for bi, blob in pairs(blobs) do
-		if blob.x and blob.vx and blob.radius then
+		if #blob.targets > 1 and blob.x and blob.vx and blob.radius then
 			if Spring.IsSphereInView(blob.x, blob.y, blob.z, blob.radius) then
 				if blob.lastDrawFrame then
 					if blob.lastDrawFrame + 10 < gameFrame then
@@ -758,6 +786,6 @@ function widget:DrawWorldPreUnit()
 			end
 		end
 	end
-	-- gl.DepthTest(false)
+	gl.DepthTest(false)
 	gl.PopMatrix()
 end
