@@ -371,7 +371,8 @@ local function EvaluateTargets(blob)
 end
 
 local function EvaluateGuards(blob)
-	blob.slotThese = {}
+	blob.willSlot = {}
+	blob.slotted = {}
 	blob.willAssist = {}
 	blob.willRepair = {}
 	blob.willGuard = {}
@@ -396,13 +397,17 @@ local function EvaluateGuards(blob)
 				guard.angle = nil
 			else
 				guard.guarding = nil
-				if guard.angle == nil then blob.needSlotting = true end
+				if guard.angle == nil then
+					blob.needSlotting = true
+					table.insert(blob.willSlot, guard)
+				else
+					table.insert(blob.slotted, guard)
+				end
 				if blob.underFire then
 					SetGuardMoveState(guard, 2)
 				else
 					SetGuardMoveState(guard, 1)
 				end
-				table.insert(blob.slotThese, guard)
 			end
 		elseif guard.canRepair and #blob.needsRepair > 0 then
 			local repair = true
@@ -425,9 +430,34 @@ local function EvaluateGuards(blob)
 	end
 end
 
+local function SlotGuard(guard, blob, ax, az, guardDist)
+	blob.guardCircumfrence = blob.guardCircumfrence + guard.size
+	local attacking
+	local cmdQueue = Spring.GetUnitCommands(guard.unitID, 1)
+	if cmdQueue[1] then
+		if cmdQueue[1].id == CMD.ATTACK then attacking = true end
+	end
+	local maxDist = guard.size * 0.5
+	if attacking then
+		if blob.underFire then
+			maxDist = ((guard.range * 0.5) + guard.speed) * 0.5
+		else
+			maxDist = ((guard.range * 0.5) + guard.speed)
+		end
+	end
+	-- move into position if needed
+	if guardDist == nil then guardDist = blob.radius + blob.guardDistance end
+	if ax == nil then ax, az = RandomAway(blob.x, blob.z, guardDist, guard.angle) end
+	local slotDist = Distance(guard.x, guard.z, ax, az)
+	if slotDist > maxDist then
+		local ay = Spring.GetGroundHeight(ax, az)
+		GiveCommand(guard.unitID, CMD.MOVE, {ax, ay, az})
+	end
+end
+
 local function AssignCombat(blob)
 	-- find angle slots if needed and move units to them
-	local divisor = #blob.slotThese
+	local divisor = #blob.slotted + #blob.willSlot
 	if divisor > 0 then
 		if divisor < 3 and (blob.lastVX ~= blob.vx or blob.lastVZ ~= blob.vz) then blob.needSlotting = true end -- one or two guards should guard in front of unit first
 		local angleAdd, angle
@@ -447,65 +477,55 @@ local function AssignCombat(blob)
 		end
 		local guardDist = blob.radius + blob.guardDistance
 		if blob.underFire then guardDist = blob.radius + (blob.guardDistance * 0.5) end
-		local guardCircumfrence = 0
+		blob.guardCircumfrence = 0
+		local emptyAngles = {}
+		-- calculate all angles and assign to unslotted first
 		for i = 1, divisor do
 			local guard
 			local ax, az
 			if blob.needSlotting then
-				-- if we need to reslot, find the nearest guard to this angle
+				-- if we need to reslot, find the nearest unslotted guard to this angle
 				local a = angle + (angleAdd * (i - 1))
 				if a > twicePi then a = a - twicePi end
-				ax, az = RandomAway(blob.x, blob.z, guardDist, a)
-				local leastDist = 10000
-				local bestGuard
-				for gi, guard in pairs(blob.slotThese) do
-					if guard.angle == nil then
-						local dist = Distance(guard.x, guard.z, ax, az)
-						if dist < leastDist then
-							leastDist = dist
-							bestGuard = gi
-						end
-					else
-						local angleDist = AngleDist(guard.angle, a)
-						local dist = abs(2 * sin(angleDist / 2)) * guardDist
-						Spring.Echo(math.floor(angleDist * 57.29), math.floor(dist))
+				if #blob.willSlot > 0 then
+					ax, az = RandomAway(blob.x, blob.z, guardDist, a)
+					local leastDist = 10000
+					local bestGuard = 1
+					for gi, g in pairs(blob.willSlot) do
+						local dist = Distance(g.x, g.z, ax, az)
 						if dist < leastDist then
 							leastDist = dist
 							bestGuard = gi
 						end
 					end
-				end
-				if bestGuard then
-					guard = table.remove(blob.slotThese, bestGuard)
+					guard = table.remove(blob.willSlot, bestGuard)
+					guard.angle = a
 				else
-					guard = table.remove(blob.slotThese)
+					table.insert(emptyAngles, a)
 				end
-				guard.angle = a
+			else
+				guard = table.remove(blob.slotted)
 			end
-			if guard == nil then guard = table.remove(blob.slotThese) end
-			guardCircumfrence = guardCircumfrence + guard.size
-			local attacking
-			local cmdQueue = Spring.GetUnitCommands(guard.unitID, 1)
-			if cmdQueue[1] then
-				if cmdQueue[1].id == CMD.ATTACK then attacking = true end
-			end
-			local maxDist = guard.size * 0.5
-			if attacking then
-				if blob.underFire then
-					maxDist = ((guard.range * 0.5) + guard.speed) * 0.5
-				else
-					maxDist = ((guard.range * 0.5) + guard.speed)
-				end
-			end
-			-- move into position if needed
-			if ax == nil then ax, az = RandomAway(blob.x, blob.z, guardDist, guard.angle) end
-			local slotDist = Distance(guard.x, guard.z, ax, az)
-			if slotDist > maxDist then
-				local ay = Spring.GetGroundHeight(ax, az)
-				GiveCommand(guard.unitID, CMD.MOVE, {ax, ay, az})
-			end
+			if guard ~= nil then SlotGuard(guard, blob, ax, az, guardDist) end
 		end
-		blob.guardDistance = max(100, ceil(guardCircumfrence / 7.5))
+		-- assign the rest to already slotted
+		for i, a in pairs(emptyAngles) do
+			local ax, az = RandomAway(blob.x, blob.z, guardDist, a)
+			local leastDist = 10000
+			local bestGuard = 1
+			for gi, g in pairs(blob.slotted) do
+				local angleDist = AngleDist(g.angle, a)
+				local dist = 2 * abs(sin(angleDist / 2)) * guardDist
+				if dist < leastDist then
+					leastDist = dist
+					bestGuard = gi
+				end
+			end
+			local guard = table.remove(blob.slotted, bestGuard)
+			guard.angle = a
+			if guard ~= nil then SlotGuard(guard, blob, ax, az, guardDist) end
+		end
+		blob.guardDistance = max(100, ceil(blob.guardCircumfrence / 7.5))
 	end
 	blob.needSlotting = false
 end
