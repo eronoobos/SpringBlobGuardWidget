@@ -28,6 +28,10 @@ local max = math.max
 local min = math.min
 local ceil = math.ceil
 
+local circleDivs = 16
+local circleTexture = "LuaUI/Images/blobguard/circle.png"
+
+local drawIndicators = true
 local mapBuffer = 32
 local CMD_AREA_GUARD = 10125
 
@@ -40,6 +44,7 @@ local defSpeed = {}
 local defSize = {}
 local defRange = {}
 local widgetCommands = {}
+local lastCalcFrame = 0
 
 local sizeX = Game.mapSizeX
 local sizeZ = Game.mapSizeZ
@@ -88,7 +93,7 @@ end
 
 local function ApplyVector(x, z, vx, vz, frames)
 	if frames == nil then frames = 30 end
-	return ConstrainToMap(x + (vx * 30), z + (vz * 30))
+	return ConstrainToMap(x + (vx *frames), z + (vz * frames))
 end
 
 local function ManhattanDistance(x1, z1, x2, z2)
@@ -99,6 +104,11 @@ end
 
 local function Pythagorean(a, b)
 	return sqrt((a^2) + (b^2))
+end
+
+local function AngleDist(angle1, angle2)
+	return abs((angle1 + 180 -  angle2) % 360 - 180)
+	-- Spring.Echo(math.floor(angleDist * 57.29), math.floor(high * 57.29), math.floor(low * 57.29))
 end
 
 local function GetLongestWeaponRange(unitDefID)
@@ -306,6 +316,7 @@ end
 local function EvaluateTargets(blob)
 	blob.needsAssist = {}
 	blob.needsRepair = {}
+	local maxTargetSize = 0
 	local minX = 100000
 	local maxX = -100000
 	local minZ = 100000
@@ -326,6 +337,7 @@ local function EvaluateTargets(blob)
 			if target.damaged then table.insert(blob.needsRepair, unitID) end
 		end
 		if moreThanOne then
+			if target.size > maxTargetSize then maxTargetSize = target.size end
 			local ux, uy, uz = Spring.GetUnitPosition(unitID)
 			if ux > maxX then maxX = ux end
 			if ux < minX then minX = ux end
@@ -344,7 +356,7 @@ local function EvaluateTargets(blob)
 		blob.speed = maxVectorSize * 30
 		local dx = maxX - minX
 		local dz = maxZ - minZ
-		blob.radius = max(dx, dz) / 2
+		blob.radius = (max(dx, dz) / 2) + (maxTargetSize / 2)
 		blob.x = (maxX + minX) / 2
 		blob.z = (maxZ + minZ) / 2
 	else
@@ -353,6 +365,7 @@ local function EvaluateTargets(blob)
 		blob.radius = blob.targets[1].size / 2
 		blob.speed = Pythagorean(blob.vx, blob.vz)
 	end
+	blob.preVectorX, blob.preVectorZ = blob.x, blob.z
 	blob.x, blob.z = ApplyVector(blob.x, blob.z, blob.vx, blob.vz)
 	blob.y = Spring.GetGroundHeight(blob.x, blob.z)
 end
@@ -415,13 +428,12 @@ end
 local function AssignCombat(blob)
 	-- find angle slots if needed and move units to them
 	local divisor = #blob.slotThese
-	local guardCircumfrence = 0
 	if divisor > 0 then
-		local angles
 		if divisor < 3 and (blob.lastVX ~= blob.vx or blob.lastVZ ~= blob.vz) then blob.needSlotting = true end -- one or two guards should guard in front of unit first
+		local angleAdd, angle
 		if blob.needSlotting then
-			local angleAdd = twicePi / divisor
-			local angle
+			-- if we need to result, get a starting angle and division
+			angleAdd = twicePi / divisor
 			if divisor < 3 and (blob.speed > 0) then 
 				 -- one or two guards should guard in front of unit first
 				angle = atan2(-blob.vz, blob.vx)
@@ -432,16 +444,46 @@ local function AssignCombat(blob)
 				angle = random() * twicePi
 				blob.lastAngle = angle
 			end
-			angles = {}
-			for i = 1, divisor do
-				local a = angle + (angleAdd * (i - 1))
-				if a > twicePi then a = a - twicePi end 
-				table.insert(angles, a)
-			end
 		end
 		local guardDist = blob.radius + blob.guardDistance
 		if blob.underFire then guardDist = blob.radius + (blob.guardDistance * 0.5) end
-		for gi, guard in pairs(blob.slotThese) do
+		local guardCircumfrence = 0
+		for i = 1, divisor do
+			local guard
+			local ax, az
+			if blob.needSlotting then
+				-- if we need to reslot, find the nearest guard to this angle
+				local a = angle + (angleAdd * (i - 1))
+				if a > twicePi then a = a - twicePi end
+				ax, az = RandomAway(blob.x, blob.z, guardDist, a)
+				local leastDist = 10000
+				local bestGuard
+				for gi, guard in pairs(blob.slotThese) do
+					if guard.angle == nil then
+						local dist = Distance(guard.x, guard.z, ax, az)
+						if dist < leastDist then
+							leastDist = dist
+							bestGuard = gi
+						end
+					else
+						local angleDist = AngleDist(guard.angle, a)
+						local dist = abs(2 * sin(angleDist / 2)) * guardDist
+						Spring.Echo(math.floor(angleDist * 57.29), math.floor(dist))
+						if dist < leastDist then
+							leastDist = dist
+							bestGuard = gi
+						end
+					end
+				end
+				if bestGuard then
+					guard = table.remove(blob.slotThese, bestGuard)
+				else
+					guard = table.remove(blob.slotThese)
+				end
+				guard.angle = a
+			end
+			if guard == nil then guard = table.remove(blob.slotThese) end
+			guardCircumfrence = guardCircumfrence + guard.size
 			local attacking
 			local cmdQueue = Spring.GetUnitCommands(guard.unitID, 1)
 			if cmdQueue[1] then
@@ -455,57 +497,17 @@ local function AssignCombat(blob)
 					maxDist = ((guard.range * 0.5) + guard.speed)
 				end
 			end
-			if blob.needSlotting then
-				guardCircumfrence = guardCircumfrence + guard.size
-				local bestAngle
-				if guard.angle == nil then
-					local leastDist = 1000
-					for ai, a in pairs(angles) do
-						local mx, mz = RandomAway(blob.x, blob.z, guardDist, a)
-						local slotDist = Distance(guard.x, guard.z, mx, mz)
-						if slotDist < leastDist then
-							leastDist = slotDist
-							bestAngle = ai
-						end
-					end
-				else
-					local leastDist = twicePi
-					for ai, a in pairs(angles) do
-						local angleDist
-						if a > pi and guard.angle < pi then
-							angleDist = (a - pi) + guard.angle
-						elseif a < pi and guard.angle > pi then
-							angleDist = a + (guard.angle - pi)
-						else
-							angleDist = abs(a - guard.angle)
-						end
-						if angleDist < leastDist then
-							leastDist = angleDist
-							bestAngle = ai
-						end
-					end
-				end
-				if bestAngle then
-					guard.angle = table.remove(angles, bestAngle)
-				else
-					guard.angle = table.remove(angles)
-				end
-			end
 			-- move into position if needed
-			local mx, mz = RandomAway(blob.x, blob.z, guardDist, guard.angle)
-			local slotDist = Distance(guard.x, guard.z, mx, mz)
+			if ax == nil then ax, az = RandomAway(blob.x, blob.z, guardDist, guard.angle) end
+			local slotDist = Distance(guard.x, guard.z, ax, az)
 			if slotDist > maxDist then
-				local my = Spring.GetGroundHeight(mx, mz)
-				GiveCommand(guard.unitID, CMD.MOVE, {mx, my, mz})
+				local ay = Spring.GetGroundHeight(ax, az)
+				GiveCommand(guard.unitID, CMD.MOVE, {ax, ay, az})
 			end
 		end
-	end
-	if blob.needSlotting then
-		blob.guardDistance = blob.radius + max(100, ceil(guardCircumfrence / 7.5))
+		blob.guardDistance = max(100, ceil(guardCircumfrence / 7.5))
 	end
 	blob.needSlotting = false
-	blob.lastVX = blob.vx
-	blob.lastVZ = blob.vz
 end
 
 local function AssignAssist(blob)
@@ -573,6 +575,15 @@ function widget:Initialize()
 	defSpeed, defSize, defRange = GetUnitDefInfo()
 	myTeam = Spring.GetMyTeamID()
 	myAllies = GetAllies(myTeam)
+	circlePolys = gl.CreateList(function()
+    gl.BeginEnd(GL.TRIANGLE_FAN, function()
+      local radstep = (2.0 * math.pi) / circleDivs
+      for i = 1, circleDivs do
+        local a = (i * radstep)
+        gl.Vertex(math.sin(a), circleOffset, math.cos(a))
+      end
+    end)
+  end)
 end
 
 function widget:CommandNotify(cmdID, cmdParams, cmdOpts)
@@ -662,7 +673,14 @@ function widget:GameFrame(gameFrame)
 			AssignAssist(blob)
 			AssignRepair(blob)
 			AssignRemaining(blob)
+			blob.lastVX = blob.vx
+			blob.lastVZ = blob.vz
+			if blob.radius and blob.lastRadius then
+				blob.expansionRate = (blob.radius - blob.lastRadius) / 30
+			end
+			blob.lastRadius = blob.radius + 0
 		end
+		lastCalcFrame = gameFrame
 	end
 end
 
@@ -677,4 +695,36 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 			blob.underFire = Spring.GetGameFrame()
 		end
 	end
+end
+
+function widget:DrawWorldPreUnit()
+	if not drawIndicators then return end
+	if #blobs == 0 then return end
+	local alt, ctrl, meta, shift = Spring.GetModKeyState()
+	if not shift then return end
+	local framesSince = Spring.GetGameFrame() - lastCalcFrame
+	gl.MatrixMode(GL.TEXTURE)
+	gl.PushMatrix()
+	gl.PolygonOffset(-25, -2)
+	gl.Culling(GL.BACK)
+	gl.DepthTest(true)
+	gl.Color(0, 0, 1, 0.25)
+	gl.Texture(circleTexture)
+	for bi, blob in pairs(blobs) do
+		if blob.x and blob.vx and blob.radius then
+			if Spring.IsSphereInView(blob.x, blob.y, blob.z, blob.radius) then
+				local x, z = ApplyVector(blob.preVectorX, blob.preVectorZ, blob.vx, blob.vz, framesSince)
+				local radius = blob.radius
+				if blob.expansionRate then radius = radius + (blob.expansionRate * framesSince) end
+				gl.LoadIdentity()
+				gl.DrawGroundQuad(x-radius, z-radius, x+radius, z+radius, false, 0, 0, 1, 1)
+			end
+		end
+	end
+	gl.Texture(false)
+	gl.DepthTest(false)
+	gl.Culling(false)
+	gl.PolygonOffset(false)
+	gl.PopMatrix()
+   	gl.MatrixMode(GL.MODELVIEW)
 end
