@@ -28,9 +28,6 @@ local max = math.max
 local min = math.min
 local ceil = math.ceil
 
-local circleDivs = 16
-local circleTexture = "LuaUI/Images/blobguard/circle.png"
-
 local drawIndicators = true
 local mapBuffer = 32
 local CMD_AREA_GUARD = 10125
@@ -145,10 +142,15 @@ local function GiveCommand(unitID, cmdID, cmdParams)
 	if command == true then
 		local cmd = { unitID = unitID, cmdID = cmdID, cmdParams = cmdParams }
 		table.insert(widgetCommands, cmd)
-		if (cmdID == CMD.GUARD or cmdID == CMD.REPAIR) and #cmdParams == 1 then
-			-- what guard is guarding or repairing
-			local guard = guards[unitID]
-			if guard then guard.targetID = cmdParams[1] end
+		local guard = guards[unitID]
+		if guard then
+			if (cmdID == CMD.GUARD or cmdID == CMD.REPAIR) and #cmdParams == 1 then
+				-- what guard is guarding or repairing
+				guard.targetID = cmdParams[1]
+			else
+				-- guard has no target
+				guard.targetID = nil
+			end
 		end
 	end
 end
@@ -356,14 +358,14 @@ local function EvaluateTargets(blob)
 		blob.speed = maxVectorSize * 30
 		local dx = maxX - minX
 		local dz = maxZ - minZ
-		blob.radius = (max(dx, dz) / 2) + (maxTargetSize / 2)
+		blob.radius = (Pythagorean(dx, dz) / 2) + (maxTargetSize / 2)
 		blob.x = (maxX + minX) / 2
 		blob.z = (maxZ + minZ) / 2
 	else
 		blob.x, blob.y, blob.z = Spring.GetUnitPosition(blob.targets[1].unitID)
 		blob.vx, blob.vy, blob.vz = Spring.GetUnitVelocity(blob.targets[1].unitID)
 		blob.radius = blob.targets[1].size / 2
-		blob.speed = Pythagorean(blob.vx, blob.vz)
+		blob.speed = Pythagorean(blob.vx, blob.vz) * 30
 	end
 	blob.preVectorX, blob.preVectorZ = blob.x, blob.z
 	blob.x, blob.z = ApplyVector(blob.x, blob.z, blob.vx, blob.vz)
@@ -409,23 +411,26 @@ local function EvaluateGuards(blob)
 					SetGuardMoveState(guard, 1)
 				end
 			end
-		elseif guard.canRepair and #blob.needsRepair > 0 then
-			local repair = true
-			local target = targets[guard.targetID]
-			if target then
-				if target.damaged then repair = false end
-			end
-			if repair then table.insert(blob.willRepair, guard) end
-		elseif guard.canAssist and #blob.needsAssist > 0 then
-			local assist = true
-			local target = targets[guard.targetID]
-			if target then
-				if target.constructing then assist = false end
-			end
-			if assist then table.insert(blob.willAssist, guard) end
 		else
-			local target = targets[guard.targetID]
-			if not target then table.insert(blob.willGuard, guard) end
+			if guard.angle then blob.needSlotting = true end
+			if guard.canRepair and #blob.needsRepair > 0 then
+				local repair = true
+				local target = targets[guard.targetID]
+				if target then
+					if target.damaged then repair = false end
+				end
+				if repair then table.insert(blob.willRepair, guard) end
+			elseif guard.canAssist and #blob.needsAssist > 0 then
+				local assist = true
+				local target = targets[guard.targetID]
+				if target then
+					if target.constructing then assist = false end
+				end
+				if assist then table.insert(blob.willAssist, guard) end
+			else
+				local target = targets[guard.targetID]
+				if not target then table.insert(blob.willGuard, guard) end
+			end
 		end
 	end
 end
@@ -595,15 +600,6 @@ function widget:Initialize()
 	defSpeed, defSize, defRange = GetUnitDefInfo()
 	myTeam = Spring.GetMyTeamID()
 	myAllies = GetAllies(myTeam)
-	circlePolys = gl.CreateList(function()
-    gl.BeginEnd(GL.TRIANGLE_FAN, function()
-      local radstep = (2.0 * math.pi) / circleDivs
-      for i = 1, circleDivs do
-        local a = (i * radstep)
-        gl.Vertex(math.sin(a), circleOffset, math.cos(a))
-      end
-    end)
-  end)
 end
 
 function widget:CommandNotify(cmdID, cmdParams, cmdOpts)
@@ -722,29 +718,46 @@ function widget:DrawWorldPreUnit()
 	if #blobs == 0 then return end
 	local alt, ctrl, meta, shift = Spring.GetModKeyState()
 	if not shift then return end
-	local framesSince = Spring.GetGameFrame() - lastCalcFrame
-	gl.MatrixMode(GL.TEXTURE)
+	local gameFrame = Spring.GetGameFrame()
+	local framesSince = gameFrame - lastCalcFrame
+	local divisor = 60 - framesSince
 	gl.PushMatrix()
-	gl.PolygonOffset(-25, -2)
-	gl.Culling(GL.BACK)
-	gl.DepthTest(true)
-	gl.Color(0, 0, 1, 0.25)
-	gl.Texture(circleTexture)
+	-- gl.DepthTest(true)
+	gl.LineWidth(3)
+	gl.Color(0, 0, 1, 0.33)
 	for bi, blob in pairs(blobs) do
 		if blob.x and blob.vx and blob.radius then
 			if Spring.IsSphereInView(blob.x, blob.y, blob.z, blob.radius) then
-				local x, z = ApplyVector(blob.preVectorX, blob.preVectorZ, blob.vx, blob.vz, framesSince)
-				local radius = blob.radius
-				if blob.expansionRate then radius = radius + (blob.expansionRate * framesSince) end
-				gl.LoadIdentity()
-				gl.DrawGroundQuad(x-radius, z-radius, x+radius, z+radius, false, 0, 0, 1, 1)
+				if blob.lastDrawFrame then
+					if blob.lastDrawFrame + 10 < gameFrame then
+						blob.displayX = nil
+						blob.displayZ = nil
+						blob.displayRadius = nil
+					end
+				end
+				local x, z
+				if blob.displayX then
+					local adjustmentX = (blob.x - blob.displayX) / divisor
+					local adjustmentZ = (blob.z - blob.displayZ) / divisor
+					x, z = ApplyVector(blob.displayX, blob.displayZ, adjustmentX, adjustmentZ, 1)
+				else
+					x, z = ApplyVector(blob.preVectorX, blob.preVectorZ, blob.vx, blob.vz, framesSince)
+				end
+				local y = Spring.GetGroundHeight(x, z)
+				local radius
+				if blob.displayRadius then
+					local adjustment = (blob.radius - blob.displayRadius) / divisor
+					radius = blob.displayRadius + adjustment
+				else
+					radius = blob.radius
+				end
+				gl.DrawGroundCircle(x, y, z, radius, 8)
+				blob.displayRadius = radius
+				blob.displayX, blob.displayZ = x, z
+				blob.lastDrawFrame = gameFrame
 			end
 		end
 	end
-	gl.Texture(false)
-	gl.DepthTest(false)
-	gl.Culling(false)
-	gl.PolygonOffset(false)
+	-- gl.DepthTest(false)
 	gl.PopMatrix()
-   	gl.MatrixMode(GL.MODELVIEW)
 end
