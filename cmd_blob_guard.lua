@@ -34,12 +34,10 @@ local CMD_AREA_GUARD = 10125
 
 local myTeam
 local myAllies
+local defInfos = {}
 local blobs = {}
 local targets = {}
 local guards = {}
-local defSpeed = {}
-local defSize = {}
-local defRange = {}
 local widgetCommands = {}
 local lastCalcFrame = 0
 
@@ -103,38 +101,70 @@ local function Pythagorean(a, b)
 	return sqrt((a^2) + (b^2))
 end
 
-local function AngleDist(angle1, angle2)
-	return abs((angle1 + 180 -  angle2) % 360 - 180)
-	-- Spring.Echo(math.floor(angleDist * 57.29), math.floor(high * 57.29), math.floor(low * 57.29))
+local function AngleAtoB(x1, z1, x2, z2)
+	local dx = x2 - x1
+	local dz = z2 - z1
+	return atan2(-dz, dx)
 end
 
-local function GetLongestWeaponRange(unitDefID)
-	local weaponRange = 0
-	local unitDef = UnitDefs[unitDefID]
-	local weapons = unitDef["weapons"]
+local function AngleDist(angle1, angle2)
+	return abs((angle1 + pi -  angle2) % twicePi - pi)
+end
+
+local function CopyTable(original)
+	local copy = {}
+	for k, v in pairs(original) do
+		copy[k] = v
+	end
+	return copy
+end
+
+local function GetPrimaryWeaponRange(uDef)
+	local weapon
+	local highestDPS = 0
+	local weapons = uDef["weapons"]
+	local death = uDef.deathExplosion
 	for i=1, #weapons do
 		local weaponDefID = weapons[i]["weaponDef"]
 		local weaponDef = WeaponDefs[weaponDefID]
-		if weaponDef["range"] > weaponRange then
-			weaponRange = weaponDef["range"]
+		local damages = weaponDef["damages"]
+		local damage = 0
+		local reload = weaponDef["reload"]
+		for i, d in pairs(damages) do
+			if d > damage then damage = d end
+		end
+		local dps = damage / reload
+		if weaponDef["name"] ~= death and dps > highestDPS then
+			weapon = weaponDef
+			highestDPS = dps
 		end
 	end
-	return weaponRange
+	if weapon then
+		--[[
+		local range = weapon["range"]
+		local reload = weapon["reload"]
+		local velocity = weapon["projectilespeed"] or 0
+		local hightrajectory = weapon["highTrajectory"]
+		local air = not weapon["canAttackGround"]
+		return range, reload, highestDPS, velocity, hightrajectory, air
+		]]--
+		return weapon["range"]
+	else
+		return 0, 0, 0, 0
+	end
 end
 
-local function GetUnitDefInfo()
-	local speeds = {}
-	local types = {}
-	local sizes = {}
-	local ranges = {}
-	for uDefID, uDef in pairs(UnitDefs) do
-		speeds[uDefID] = uDef.speed
-		local x = uDef.xsize * 8
-		local z = uDef.zsize * 8
-		sizes[uDefID] = ceil(Pythagorean(x, z))
-		ranges[uDefID] = GetLongestWeaponRange(uDefID)
-	end
-	return speeds, sizes, ranges
+local function GetDefInfo(uDefID)
+	local info = defInfos[uDefID]
+	if info ~= nil then return info end
+	local uDef = UnitDefs[uDefID]
+	local xs = uDef.xsize * 8
+	local zs = uDef.zsize * 8
+	local size = ceil(Pythagorean(xs, zs))
+	local range = GetPrimaryWeaponRange(uDef)
+	info = { speed = uDef.speed, size = size, range = range, canMove = uDef.canMove, canAttack = uDef.canAttack, canAssist = uDef.canAssist, canRepair = uDef.canRepair, canFly = uDef.canFly, isCombatant = uDef.canMove and uDef.canAttack and not uDef.canFly and not uDef.canAssist and not uDef.canRepair }
+	defInfos[uDefID] = info
+	return info
 end
 
 local function GiveCommand(unitID, cmdID, cmdParams)
@@ -164,19 +194,20 @@ end
 
 local function CreateGuard(unitID)
 	local defID = Spring.GetUnitDefID(unitID)
-	local uDef = UnitDefs[defID]
 	local states = Spring.GetUnitStates(unitID)
-	local guard = { unitID = unitID, initialMoveState = states["movestate"], moveState = states["movestate"], speed = defSpeed[defID], size = defSize[defID], range = defRange[defID], canMove = uDef.canMove, canAttack = uDef.canAttack, canAssist = uDef.canAssist, canRepair = uDef.canRepair, canFly = uDef.canFly }
-	if guard.canAttack and not guard.canFly and not guard.canAssist and not guard.canRepair then
-		guard.isCombatant = true
-	end
+	local info = GetDefInfo(defID)
+	local guard = CopyTable(info)
+	guard.unitID = unitID
+	guard.initialMoveState = states["movestate"]
+	guard.moveState = states["movestate"]
 	guards[unitID] = guard
 	return guard
 end
 
 local function CreateTarget(unitID)
 	local defID = Spring.GetUnitDefID(unitID)
-	local target = { unitID = unitID, size = defSize[defID] }
+	local info = GetDefInfo(defID)
+	local target = { unitID = unitID, size = info.size }
 	targets[unitID] = target
 	return target
 end
@@ -509,6 +540,13 @@ local function AssignCombat(blob)
 				-- grab an angle from an already slotted guard
 				angle = blob.slotted[1].angle
 				blob.lastAngle = angle
+			elseif blob.willSlot[1] then
+				-- angle from a unit's position
+				local guard = blob.willSlot[1]
+				if guard.x == nil then
+					guard.x, guard.y, guard.z = Spring.GetUnitPosition(guard.unitID)
+				end
+				angle = AngleAtoB(blob.x, blob.z, guard.x, guard.z)
 			else
 				angle = random() * twicePi
 				blob.lastAngle = angle
@@ -620,7 +658,7 @@ end
 
 function widget:CommandsChanged()
 	local customCommands = widgetHandler.customCommands
-	table.insert(customCommands, {			
+	table.insert(customCommands, {
 		id      = CMD_AREA_GUARD,
 		type    = CMDTYPE.ICON_AREA,
 		tooltip = 'Define an area within which to guard all units',
@@ -631,7 +669,6 @@ function widget:CommandsChanged()
 end
 
 function widget:Initialize()
-	defSpeed, defSize, defRange = GetUnitDefInfo()
 	myTeam = Spring.GetMyTeamID()
 	myAllies = GetAllies(myTeam)
 end
