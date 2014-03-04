@@ -1,18 +1,9 @@
---[[
-NOTES
------
-to handle command queues, should
-	create a blob with all the right who is guarding who information when the command is queued, but do not activate the blob until it comes up in the queue.
-	but this has to happen on a per-guard basis, so the blob needs to keep a table of potential guards and guards who are currently on guard orders
-also what is the point of createmonoblob? it lacks the check if the target is guarding the guard. why not just call CreateBlob({guardID}, {targetID}) from the start?
-]]--
-
 function widget:GetInfo()
 	return {
 		name	= "Blob Guard",
 		desc	= "guards multiple units",
 		author  = "zoggop",
-		date 	= "February 2014",
+		date 	= "March 2014",
 		license	= "whatever",
 		layer 	= 0,
 		enabled	= true,
@@ -698,20 +689,46 @@ local function QueueGuardTargets(unitID, cmdID, cmdParams, targetted)
 	guardTargetQueue[unitID][CommandString(cmdID, cmdParams)] = targetted
 end
 
+local cmdAreaGuard = {
+	id      = CMD_AREA_GUARD,
+	type    = CMDTYPE.ICON_AREA,
+	tooltip = 'Define an area within which to guard all units',
+	name    = 'Area Guard',
+	cursor  = 'Guard',
+	action  = 'areaguard',
+}
 
 
 -- SPRING CALLINS
 
 function widget:CommandsChanged()
 	local customCommands = widgetHandler.customCommands
-	table.insert(customCommands, {
-		id      = CMD_AREA_GUARD,
-		type    = CMDTYPE.ICON_AREA,
-		tooltip = 'Define an area within which to guard all units',
-		name    = 'AreaGuard',
-		cursor  = 'Guard',
-		action  = 'areaguard',
-	})
+	table.insert(customCommands, cmdAreaGuard)
+end
+
+function widget:KeyPress(key, mods, isRepeat) 
+	--[[
+	if (key == 0x067) and (not isRepeat) and (not mods.ctrl) and not (mods.shift) and (not mods.alt) then --g
+		local cmdDescs = Spring.GetActiveCmdDescs()
+		for i, cmdDesc in pairs(cmdDescs) do
+			if cmdDesc.type ~= 20 then
+				for k, v in pairs(cmdDesc) do
+					Spring.Echo(k, v)
+					if k == "params" then
+						for kk, vv in pairs(v) do
+							Spring.Echo(kk, vv)
+						end
+					end
+				end
+				Spring.Echo(" ")
+			end
+		end
+		-- Spring.Echo("g")
+		-- Spring.SetActiveCommand("areaguard")
+		return true
+	end
+	return false
+	]]--
 end
 
 function widget:Initialize()
@@ -734,6 +751,7 @@ function widget:CommandNotify(cmdID, cmdParams, cmdOpts)
 		end
 		if #targetted > 0 then
 			targetted = FilterTargets(selected, targetted)
+			if #targetted == 0 then return end
 			if cmdOpts["shift"] then
 				-- check if this command is current for each guard
 				for i = 1, #selected do
