@@ -184,12 +184,14 @@ end
 
 local function GiveCommand(unitID, cmdID, cmdParams)
 	local guard = guards[unitID]
+	--[[
 	if guard then
 		if not guard.waitBuffer then
 			Spring.GiveOrderToUnit(unitID, CMD.INSERT, {1, CMD.WAIT, CMD.OPT_SHIFT}, {"alt"})
 			guard.waitBuffer = true
 		end
 	end
+	]]--
 	local commands = Spring.GetUnitCommands(unitID)
 	if #commands > 0 then
 		local tagsToRemove = {}
@@ -252,6 +254,7 @@ local function ResetCommands(unitID)
 	local guard = guards[unitID]
 	if guard == nil then return end
 	Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {guard.initialMoveState}, {})
+	--[[
 	if guard.waitBuffer then
 		local cmds = Spring.GetUnitCommands(unitID)
 		for i = 1, #cmds do
@@ -262,6 +265,7 @@ local function ResetCommands(unitID)
 			end
 		end
 	end
+	]]--
 end
 
 local function ClearBlob(blob)
@@ -708,11 +712,16 @@ end
 local cmdAreaGuard = {
 	id      = CMD_AREA_GUARD,
 	type    = CMDTYPE.ICON_AREA,
-	tooltip = 'Define an area within which to guard all units',
+	tooltip = 'Guard all units within a circle.',
 	name    = 'Area Guard',
 	cursor  = 'Guard',
 	action  = 'areaguard',
+	nwtext = CMD.GUARD,
+	netext = CMD.GUARD,
+	swtext = CMD.GUARD,
+	setext = CMD.GUARD,
 }
+
 
 
 -- SPRING CALLINS
@@ -723,28 +732,27 @@ function widget:CommandsChanged()
 end
 
 function widget:KeyPress(key, mods, isRepeat) 
-	--[[
 	if (key == 0x067) and (not isRepeat) and (not mods.ctrl) and not (mods.shift) and (not mods.alt) then --g
 		local cmdDescs = Spring.GetActiveCmdDescs()
+		Spring.Echo(#cmdDescs)
+		--[[
 		for i, cmdDesc in pairs(cmdDescs) do
-			if cmdDesc.type ~= 20 then
-				for k, v in pairs(cmdDesc) do
-					Spring.Echo(k, v)
-					if k == "params" then
-						for kk, vv in pairs(v) do
-							Spring.Echo(kk, vv)
-						end
+			for k, v in pairs(cmdDesc) do
+				Spring.Echo(k, v)
+				if k == "params" then
+					for kk, vv in pairs(v) do
+						Spring.Echo(kk, vv)
 					end
 				end
-				Spring.Echo(" ")
 			end
+			Spring.Echo(" ")
 		end
+		]]--
 		-- Spring.Echo("g")
 		-- Spring.SetActiveCommand("areaguard")
 		return true
 	end
 	return false
-	]]--
 end
 
 function widget:Initialize()
