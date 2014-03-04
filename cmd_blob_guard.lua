@@ -192,13 +192,17 @@ local function GiveCommand(unitID, cmdID, cmdParams)
 	end
 	local commands = Spring.GetUnitCommands(unitID)
 	if #commands > 0 then
+		local tagsToRemove = {}
 		for i = 1, #commands do
 			local command = commands[i]
 			local cmdString = CommandString(command.id, command.params, unitID)
 			if widgetCommands[cmdString] then
-				Spring.GiveOrderToUnit(unitID, CMD.REMOVE, {command.tag}, {})
+				table.insert(tagsToRemove, command.tag)
 				widgetCommands[cmdString] = nil
 			end
+		end
+		for i = 1, #tagsToRemove do
+			Spring.GiveOrderToUnit(unitID, CMD.REMOVE, {tagsToRemove[i]}, {})
 		end
 	end
 	local insertParams = {0, cmdID, CMD.OPT_RIGHT }
@@ -244,9 +248,10 @@ local function CreateTarget(unitID)
 	return target
 end
 
-local function ClearWaitBuffer(unitID)
+local function ResetCommands(unitID)
 	local guard = guards[unitID]
 	if guard == nil then return end
+	Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {guard.initialMoveState}, {})
 	if guard.waitBuffer then
 		local cmds = Spring.GetUnitCommands(unitID)
 		for i = 1, #cmds do
@@ -264,7 +269,7 @@ local function ClearBlob(blob)
 		targets[target.unitID] = nil
 	end
 	for gi, guard in pairs(blob.guards) do
-		ClearWaitBuffer(guard.unitID)
+		ResetCommands(guard.unitID)
 		guards[guard.unitID] = nil
 	end
 	for bi, checkBlob in pairs(blobs) do
@@ -294,14 +299,13 @@ end
 local function ClearGuard(unitID, blobDo)
 	local guard = guards[unitID]
 	if guard == nil then return false end
-	ClearWaitBuffer(unitID)
+	ResetCommands(unitID)
 	local blob = guard.blob
 	for gi, blobGuard in pairs(blob.guards) do
 		if blobGuard == guard then
 			if guard.canAssist then blob.canAssist = blob.canAssist - 1 end
 			if guard.canRepair then blob.canRepair = blob.canRepair - 1 end
 			if guard.angle then blob.needSlotting = true end
-			Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {guard.initialMoveState}, {})
 			table.remove(blob.guards, gi)
 			break
 		end
@@ -832,11 +836,10 @@ function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdTag, cmdParam
 				guardTargetQueue[unitID] = nil
 			end
 		end
-	elseif guards[unitID] then
+	end
+	if guards[unitID] then
 		local cmdString = CommandString(cmdID, cmdParams, unitID)
-		if widgetCommands[cmdString] then
-			widgetCommands[cmdString] = nil
-		end
+		widgetCommands[cmdString] = nil
 	end
 end
 
@@ -898,10 +901,10 @@ function widget:DrawWorldPreUnit()
 	local divisor = 60 - framesSince
 	gl.PushMatrix()
 	gl.DepthTest(true)
-	gl.LineWidth(1.5)
+	gl.LineWidth(1)
 	gl.Color(0, 0, 1, 0.33)
 	for bi, blob in pairs(blobs) do
-		if #blob.targets > 1 and blob.x and blob.vx and blob.radius then
+		if blob.x and blob.vx and blob.radius then
 			if Spring.IsSphereInView(blob.x, blob.y, blob.z, blob.radius) then
 				if blob.lastDrawFrame then
 					if blob.lastDrawFrame + 10 < gameFrame then
@@ -918,7 +921,6 @@ function widget:DrawWorldPreUnit()
 				else
 					x, z = ApplyVector(blob.preVectorX, blob.preVectorZ, blob.vx, blob.vz, framesSince)
 				end
-				local y = Spring.GetGroundHeight(x, z)
 				local radius
 				if blob.displayRadius then
 					local adjustment = (blob.radius - blob.displayRadius) / divisor
@@ -926,7 +928,7 @@ function widget:DrawWorldPreUnit()
 				else
 					radius = blob.radius
 				end
-				gl.DrawGroundCircle(x, y, z, radius, 32)
+				gl.DrawGroundCircle(x, 0, z, radius, 32)
 				blob.displayRadius = radius
 				blob.displayX, blob.displayZ = x, z
 				blob.lastDrawFrame = gameFrame
