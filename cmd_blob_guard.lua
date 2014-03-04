@@ -15,6 +15,11 @@ end
 
 -- LOCAL DEFINITIONS
 
+local drawIndicators = true
+local mapBuffer = 32
+local CMD_AREA_GUARD = 10125
+local period = 20
+
 local sqrt = math.sqrt
 local random = math.random
 local pi = math.pi
@@ -27,10 +32,6 @@ local abs = math.abs
 local max = math.max
 local min = math.min
 local ceil = math.ceil
-
-local drawIndicators = true
-local mapBuffer = 32
-local CMD_AREA_GUARD = 10125
 
 local myTeam
 local myAllies
@@ -88,7 +89,7 @@ local function Distance(x1, z1, x2, z2)
 end
 
 local function ApplyVector(x, z, vx, vz, frames)
-	if frames == nil then frames = 30 end
+	if frames == nil then frames = period end
 	return ConstrainToMap(x + (vx *frames), z + (vz * frames))
 end
 
@@ -182,11 +183,22 @@ local function CommandString(cmdID, cmdParams, unitID)
 end
 
 local function GiveCommand(unitID, cmdID, cmdParams)
+	local guard = guards[unitID]
+	if guard then
+		if not guard.waitBuffer then
+			Spring.GiveOrderToUnit(unitID, CMD.INSERT, {1, CMD.WAIT, CMD.OPT_SHIFT}, {"alt"})
+			guard.waitBuffer = true
+		end
+	end
 	local commands = Spring.GetUnitCommands(unitID)
 	if #commands > 0 then
-		local first = commands[1]
-		if widgetCommands[CommandString(first.id, first.params, unitID)] then
-			Spring.GiveOrderToUnit(unitID, CMD.REMOVE, {first.tag}, {})
+		for i = 1, #commands do
+			local command = commands[i]
+			local cmdString = CommandString(command.id, command.params, unitID)
+			if widgetCommands[cmdString] then
+				Spring.GiveOrderToUnit(unitID, CMD.REMOVE, {command.tag}, {})
+				widgetCommands[cmdString] = nil
+			end
 		end
 	end
 	local insertParams = {0, cmdID, CMD.OPT_RIGHT }
@@ -194,7 +206,6 @@ local function GiveCommand(unitID, cmdID, cmdParams)
 	local command = Spring.GiveOrderToUnit(unitID, CMD.INSERT, insertParams, {"alt"})
 	if command == true then
 		widgetCommands[CommandString(cmdID, cmdParams, unitID)] = true
-		local guard = guards[unitID]
 		if guard then
 			if (cmdID == CMD.GUARD or cmdID == CMD.REPAIR) and #cmdParams == 1 then
 				-- what guard is guarding or repairing
@@ -233,11 +244,27 @@ local function CreateTarget(unitID)
 	return target
 end
 
+local function ClearWaitBuffer(unitID)
+	local guard = guards[unitID]
+	if guard == nil then return end
+	if guard.waitBuffer then
+		local cmds = Spring.GetUnitCommands(unitID)
+		for i = 1, #cmds do
+			local cmd = cmds[i]
+			if cmd.id == CMD.WAIT then
+				Spring.GiveOrderToUnit(guard.unitID, CMD.REMOVE, {cmd.tag}, {})
+				break
+			end
+		end
+	end
+end
+
 local function ClearBlob(blob)
 	for ti, target in pairs(blob.targets) do
 		targets[target.unitID] = nil
 	end
 	for gi, guard in pairs(blob.guards) do
+		ClearWaitBuffer(guard.unitID)
 		guards[guard.unitID] = nil
 	end
 	for bi, checkBlob in pairs(blobs) do
@@ -264,9 +291,10 @@ local function ClearTarget(unitID)
 	targets[unitID] = nil
 end
 
-local function ClearGuard(unitID)
+local function ClearGuard(unitID, blobDo)
 	local guard = guards[unitID]
 	if guard == nil then return false end
+	ClearWaitBuffer(unitID)
 	local blob = guard.blob
 	for gi, blobGuard in pairs(blob.guards) do
 		if blobGuard == guard then
@@ -334,6 +362,7 @@ local function CreateBlob(guardList, targetList)
 			end
 		end
 	end
+	local totalDupeGuards = 0
 	if overlapBlob then
 		-- check for duplicate guards on the overlap blob
 		-- and check for guards in the overlap blob that are set as targets here
@@ -368,23 +397,6 @@ local function CreateBlob(guardList, targetList)
 		table.insert(blob.targets, target)
 	end
 	if not overlapBlob then table.insert(blobs, blob) end
-	return blob
-end
-
-local function CreateMonoBlob(guardID, targetID)
-	local target = targets[targetID]
-	local blob
-	if target then
-		blob = target.blob
-		ClearGuard(guardID)
-		local guard = CreateGuard(guardID)
-		guard.blob = blob
-		table.insert(blob.guards, guard)
-		if guard.canAssist then blob.canAssist = blob.canAssist + 1 end
-		if guard.canRepair then blob.canRepair = blob.canRepair + 1 end
-	else
-		blob = CreateBlob({guardID}, {targetID})
-	end
 	return blob
 end
 
@@ -435,7 +447,7 @@ local function EvaluateTargets(blob)
 	if moreThanOne then
 		blob.vx = totalVX / #blob.targets
 		blob.vz = totalVZ / #blob.targets
-		blob.speed = maxVectorSize * 30
+		blob.speed = maxVectorSize * period
 		local dx = maxX - minX
 		local dz = maxZ - minZ
 		blob.radius = (Pythagorean(dx, dz) / 2) + (maxTargetSize / 2)
@@ -445,7 +457,7 @@ local function EvaluateTargets(blob)
 		blob.x, blob.y, blob.z = Spring.GetUnitPosition(blob.targets[1].unitID)
 		blob.vx, blob.vy, blob.vz = Spring.GetUnitVelocity(blob.targets[1].unitID)
 		blob.radius = blob.targets[1].size / 2
-		blob.speed = Pythagorean(blob.vx, blob.vz) * 30
+		blob.speed = Pythagorean(blob.vx, blob.vz) * period
 	end
 	blob.preVectorX, blob.preVectorZ = blob.x, blob.z
 	blob.x, blob.z = ApplyVector(blob.x, blob.z, blob.vx, blob.vz)
@@ -775,7 +787,6 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdOpts, cmdPara
 	-- check if this is a command issued from this widget
 	local cmdString = CommandString(cmdID, cmdParams, unitID)
 	if widgetCommands[cmdString] then
-		widgetCommands[cmdString] = nil
 		return
 	end
 	-- below is not a widget command
@@ -821,6 +832,11 @@ function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdTag, cmdParam
 				guardTargetQueue[unitID] = nil
 			end
 		end
+	elseif guards[unitID] then
+		local cmdString = CommandString(cmdID, cmdParams, unitID)
+		if widgetCommands[cmdString] then
+			widgetCommands[cmdString] = nil
+		end
 	end
 end
 
@@ -836,7 +852,7 @@ function widget:UnitTaken(unitID, unitDefID, unitTeam, newTeam)
 end
 
 function widget:GameFrame(gameFrame)
-	if gameFrame % 30 == 0 then
+	if gameFrame % period == 0 then
 		for bi, blob in pairs(blobs) do
 			if blob.underFire ~= nil then
 				-- blob is no longer under fire after 5 seconds
@@ -853,7 +869,7 @@ function widget:GameFrame(gameFrame)
 			blob.lastVX = blob.vx
 			blob.lastVZ = blob.vz
 			if blob.radius and blob.lastRadius then
-				blob.expansionRate = (blob.radius - blob.lastRadius) / 30
+				blob.expansionRate = (blob.radius - blob.lastRadius) / period
 			end
 			blob.lastRadius = blob.radius + 0
 		end
@@ -882,7 +898,7 @@ function widget:DrawWorldPreUnit()
 	local divisor = 60 - framesSince
 	gl.PushMatrix()
 	gl.DepthTest(true)
-	gl.LineWidth(3)
+	gl.LineWidth(1.5)
 	gl.Color(0, 0, 1, 0.33)
 	for bi, blob in pairs(blobs) do
 		if #blob.targets > 1 and blob.x and blob.vx and blob.radius then
@@ -910,7 +926,7 @@ function widget:DrawWorldPreUnit()
 				else
 					radius = blob.radius
 				end
-				gl.DrawGroundCircle(x, y, z, radius, 8)
+				gl.DrawGroundCircle(x, y, z, radius, 32)
 				blob.displayRadius = radius
 				blob.displayX, blob.displayZ = x, z
 				blob.lastDrawFrame = gameFrame
