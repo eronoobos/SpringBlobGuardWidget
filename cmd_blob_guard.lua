@@ -1,3 +1,12 @@
+--[[
+NOTES
+-----
+to handle command queues, should
+	create a blob with all the right who is guarding who information when the command is queued, but do not activate the blob until it comes up in the queue.
+	but this has to happen on a per-guard basis, so the blob needs to keep a table of potential guards and guards who are currently on guard orders
+also what is the point of createmonoblob? it lacks the check if the target is guarding the guard. why not just call CreateBlob({guardID}, {targetID}) from the start?
+]]--
+
 function widget:GetInfo()
 	return {
 		name	= "Blob Guard",
@@ -39,6 +48,7 @@ local blobs = {}
 local targets = {}
 local guards = {}
 local widgetCommands = {}
+local guardTargetQueue = {}
 local lastCalcFrame = 0
 
 local sizeX = Game.mapSizeX
@@ -167,11 +177,32 @@ local function GetDefInfo(uDefID)
 	return info
 end
 
+local function CommandString(cmdID, cmdParams, unitID)
+	local commandString = cmdID .. " "
+	local number = #cmdParams
+	for i = 1, number do 
+		commandString = commandString .. cmdParams[i]
+		if i ~= number then commandString = commandString .. " " end
+	end
+	if unitID ~= nil then
+		commandString = commandString .. " " .. unitID
+	end
+	return commandString
+end
+
 local function GiveCommand(unitID, cmdID, cmdParams)
-	local command = Spring.GiveOrderToUnit(unitID, cmdID, cmdParams, {})
+	local commands = Spring.GetUnitCommands(unitID)
+	if #commands > 0 then
+		local first = commands[1]
+		if widgetCommands[CommandString(first.id, first.params, unitID)] then
+			Spring.GiveOrderToUnit(unitID, CMD.REMOVE, {first.tag}, {})
+		end
+	end
+	local insertParams = {0, cmdID, CMD.OPT_RIGHT }
+	for i = 1, #cmdParams do table.insert(insertParams, cmdParams[i]) end
+	local command = Spring.GiveOrderToUnit(unitID, CMD.INSERT, insertParams, {"alt"})
 	if command == true then
-		local cmd = { unitID = unitID, cmdID = cmdID, cmdParams = cmdParams }
-		table.insert(widgetCommands, cmd)
+		widgetCommands[CommandString(cmdID, cmdParams, unitID)] = true
 		local guard = guards[unitID]
 		if guard then
 			if (cmdID == CMD.GUARD or cmdID == CMD.REPAIR) and #cmdParams == 1 then
@@ -195,8 +226,7 @@ end
 local function CreateGuard(unitID)
 	local defID = Spring.GetUnitDefID(unitID)
 	local states = Spring.GetUnitStates(unitID)
-	local info = GetDefInfo(defID)
-	local guard = CopyTable(info)
+	local guard = CopyTable(GetDefInfo(defID))
 	guard.unitID = unitID
 	guard.initialMoveState = states["movestate"]
 	guard.moveState = states["movestate"]
@@ -274,33 +304,29 @@ local function CreateBlob(guardList, targetList)
 	local theseGuards = {}
 	local theseNewTargets = {}
 	local overlapBlob
-	local totalTargets = 0
 	local totalNewTargets = 0
 	for i, unitID in pairs(guardList) do theseGuards[unitID] = true end
 	for i, unitID in pairs(targetList) do
-		if not theseGuards[unitID] then
-			-- make sure this target isn't guarding our guards and clear it if it is
-			local guard = guards[unitID]
-			local targetIsGuardingUs
-			if guard then
-				for ti, t in pairs(guard.blob.targets) do
-					if theseGuards[t.unitID] then
-						targetIsGuardingUs = true
-					end
+		-- make sure this target isn't guarding our guards and clear it if it is
+		local guard = guards[unitID]
+		local targetIsGuardingUs
+		if guard then
+			for ti, t in pairs(guard.blob.targets) do
+				if theseGuards[t.unitID] then
+					targetIsGuardingUs = true
 				end
 			end
-			if targetIsGuardingUs then ClearGuard(unitID) end
-			local target = targets[unitID]
-			if target then
-				overlapBlob = target.blob
-			else
-				theseNewTargets[unitID] = true
-				totalNewTargets = totalNewTargets + 1
-			end
-			totalTargets = totalTargets + 1
+		end
+		if targetIsGuardingUs then ClearGuard(unitID) end
+		-- is this target already in a blob?
+		local target = targets[unitID]
+		if target then
+			overlapBlob = target.blob
+		else
+			theseNewTargets[unitID] = true
+			totalNewTargets = totalNewTargets + 1
 		end
 	end
-	if totalTargets == 0 then return end
 	local dupeGuards = {}
 	if overlapBlob then
 		-- make sure our guards aren't targets in the blob we're merging with
@@ -351,6 +377,7 @@ local function CreateBlob(guardList, targetList)
 		table.insert(blob.targets, target)
 	end
 	if not overlapBlob then table.insert(blobs, blob) end
+	return blob
 end
 
 local function CreateMonoBlob(guardID, targetID)
@@ -367,6 +394,7 @@ local function CreateMonoBlob(guardID, targetID)
 	else
 		blob = CreateBlob({guardID}, {targetID})
 	end
+	return blob
 end
 
 local function GetAllies(myTeam)
@@ -652,6 +680,24 @@ local function AssignRemaining(blob)
 	end
 end
 
+local function FilterTargets(guardList, targetList)
+	-- filter out targets that are guards
+	local theseGuards = {}
+	local filteredTargets = {}
+	for i, unitID in pairs(guardList) do theseGuards[unitID] = true end
+	for i, unitID in pairs(targetList) do
+		if not theseGuards[unitID] then
+			table.insert(filteredTargets, unitID)
+		end
+	end
+	return filteredTargets
+end
+
+local function QueueGuardTargets(unitID, cmdID, cmdParams, targetted)
+	if guardTargetQueue[unitID] == nil then guardTargetQueue[unitID] = {} end
+	guardTargetQueue[unitID][CommandString(cmdID, cmdParams)] = targetted
+end
+
 
 
 -- SPRING CALLINS
@@ -674,31 +720,34 @@ function widget:Initialize()
 end
 
 function widget:CommandNotify(cmdID, cmdParams, cmdOpts)
-	if not interruptCmd[cmdID] then return end
-	local selected = Spring.GetSelectedUnits()
-	if #selected == 0 then return end
-	local targetted
 	if cmdID == CMD_AREA_GUARD then
+		local selected = Spring.GetSelectedUnits()
+		if #selected == 0 then return end
 		local cx, cy, cz, cr = cmdParams[1], cmdParams[2], cmdParams[3], cmdParams[4]
 		-- find all units in area
-		targetted = {}
+		local targetted = {}
 		for i, team in pairs(myAllies) do
 			local units = Spring.GetUnitsInCylinder(cx, cz, cr, team)
 			for i, unitID in pairs(units) do
 				table.insert(targetted, unitID)
 			end
 		end
-	end
-	if targetted ~= nil then
-		if #targetted > 0 then 
-			local clearCurrent = true
-			for i, opt in pairs(cmdOpts) do
-				if opt == CMD.OPT_SHIFT then
-					clearCurrent = false
+		if #targetted > 0 then
+			targetted = FilterTargets(selected, targetted)
+			if cmdOpts["shift"] then
+				-- check if this command is current for each guard
+				for i = 1, #selected do
+					local unitID = selected[i]
+					local commands = Spring.GetUnitCommands(unitID)
+					if #commands == 0 then
+						CreateBlob({unitID}, targetted)
+					else
+						QueueGuardTargets(unitID, cmdID, cmdParams, targetted)
+					end
 				end
+			else
+				CreateBlob(selected, targetted)
 			end
-			if clearCurrent then ClearGuards(selected) end
-			CreateBlob(selected, targetted)
 		end
 	end
 end
@@ -706,31 +755,54 @@ end
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdOpts, cmdParams, cmdTag)
 	if not interruptCmd[cmdID] then return end
 	-- check if this is a command issued from this widget
-	for ci, cmd in pairs(widgetCommands) do
-		if unitID == cmd.unitID and cmdID == cmd.cmdID then
-			local paramsMatch = true
-			for pi, param in pairs(cmdParams) do
-				if cmd.cmdParams[pi] ~= param then
-					paramsMatch = false
-					break
-				end
-			end
-			if paramsMatch then
-				table.remove(widgetCommands, ci)
-				return
-			end
-		end
+	local cmdString = CommandString(cmdID, cmdParams, unitID)
+	if widgetCommands[cmdString] then
+		widgetCommands[cmdString] = nil
+		return
 	end
 	-- below is not a widget command
+	local shiftOpt = cmdOpts == CMD.OPT_SHIFT or cmdOpts == CMD.OPT_SHIFT + CMD.OPT_RIGHT
 	if cmdID == CMD.GUARD then
-		local clearCurrent = true
-		if cmdOpts == CMD.OPT_SHIFT then
-			clearCurrent = false
+		local currentCommand = true
+		if shiftOpt then
+			local commands = Spring.GetUnitCommands(unitID)
+			if #commands > 0 then currentCommand = false end
 		end
-		if clearCurrent then ClearGuard(unitID) end
-		CreateMonoBlob(unitID, cmdParams[1])
+		if currentCommand then
+			ClearGuard(unitID)
+			CreateBlob({unitID}, {cmdParams[1]})
+		else
+			QueueGuardTargets(unitID, cmdID, cmdParams, {cmdParams[1]})
+		end
 	elseif cmdID ~= CMD_AREA_GUARD then
-		if guards[unitID] then ClearGuard(unitID) end
+		if not shiftOpt and guards[unitID] then
+			ClearGuard(unitID)
+		end
+	end
+end
+
+function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdTag, cmdParams, cmdOpts)
+	local guardTargets = guardTargetQueue[unitID]
+	if guardTargets then
+		-- see if the current command is a guard command
+		local commands = Spring.GetUnitCommands(unitID)
+		if #commands == 0 then return end
+		local cmdString = CommandString(commands[1].id, commands[1].params)
+		local targets = guardTargets[cmdString]
+		if targets then
+			-- add it to the blob
+			CreateBlob({unitID}, targets)
+			-- remove the set of targets from the queue
+			guardTargets[cmdString] = nil
+			local count = 0
+			for cs, t in pairs(guardTargets) do
+				count = count + 1
+			end
+			if count == 0 then
+				guardTargets = nil
+				guardTargetQueue[unitID] = nil
+			end
+		end
 	end
 end
 
