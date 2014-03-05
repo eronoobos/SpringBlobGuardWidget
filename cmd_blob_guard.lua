@@ -182,16 +182,35 @@ local function CommandString(cmdID, cmdParams, unitID)
 	return commandString
 end
 
-local function GiveCommand(unitID, cmdID, cmdParams)
-	local guard = guards[unitID]
-	--[[
-	if guard then
-		if not guard.waitBuffer then
-			Spring.GiveOrderToUnit(unitID, CMD.INSERT, {1, CMD.WAIT, CMD.OPT_SHIFT}, {"alt"})
-			guard.waitBuffer = true
+local function GetUnitObjectPosition(guardOrTarget)
+	local f = Spring.GetGameFrame()
+	if guardOrTarget.x == nil or guardOrTarget.lastGotPosition == nil or f > guardOrTarget.lastGotPosition + period - 1 then
+		guardOrTarget.x, guardOrTarget.y, guardOrTarget.z = Spring.GetUnitPosition(guardOrTarget.unitID)
+		guardOrTarget.lastGotPosition = f
+	end
+	return guardOrTarget.x, guardOrTarget.y, guardOrTarget.z
+end
+
+local function NearestTargetID(guard)
+	local gx, gy, gz = GetUnitObjectPosition(guard)
+	local targets = guard.blob.targets
+	local leastDist = 100000
+	local leastTarget
+	for i = 1, #targets do
+		local target = targets[i]
+		local tx, ty, tz = GetUnitObjectPosition(target)
+		local dist = Distance(gx, gz, tx, tz)
+		if dist < leastDist then
+			leastDist = dist
+			leastTarget = target
 		end
 	end
-	]]--
+	if leastTarget then
+		return leastTarget.unitID
+	end
+end
+
+local function GiveCommand(unitID, cmdID, cmdParams)
 	local commands = Spring.GetUnitCommands(unitID)
 	if #commands > 0 then
 		local tagsToRemove = {}
@@ -206,6 +225,13 @@ local function GiveCommand(unitID, cmdID, cmdParams)
 		for i = 1, #tagsToRemove do
 			Spring.GiveOrderToUnit(unitID, CMD.REMOVE, {tagsToRemove[i]}, {})
 		end
+	end
+	local guard = guards[unitID]
+	if guard then
+		local tID = NearestTargetID(guard)
+		local params = {0, CMD.GUARD, CMD.OPT_SHIFT, tID}
+		Spring.GiveOrderToUnit(unitID, CMD.INSERT, params, {"alt"})
+		widgetCommands[CommandString(CMD.GUARD, params, unitID)] = true
 	end
 	local insertParams = {0, cmdID, CMD.OPT_RIGHT }
 	for i = 1, #cmdParams do table.insert(insertParams, cmdParams[i]) end
@@ -440,7 +466,7 @@ local function EvaluateTargets(blob)
 		end
 		if moreThanOne then
 			if target.size > maxTargetSize then maxTargetSize = target.size end
-			local ux, uy, uz = Spring.GetUnitPosition(unitID)
+			local ux, uy, uz = GetUnitObjectPosition(target)
 			if ux > maxX then maxX = ux end
 			if ux < minX then minX = ux end
 			if uz > maxZ then maxZ = uz end
@@ -462,7 +488,7 @@ local function EvaluateTargets(blob)
 		blob.x = (maxX + minX) / 2
 		blob.z = (maxZ + minZ) / 2
 	else
-		blob.x, blob.y, blob.z = Spring.GetUnitPosition(blob.targets[1].unitID)
+		blob.x, blob.y, blob.z = GetUnitObjectPosition(blob.targets[1])
 		blob.vx, blob.vy, blob.vz = Spring.GetUnitVelocity(blob.targets[1].unitID)
 		blob.radius = blob.targets[1].size / 2
 		blob.speed = Pythagorean(blob.vx, blob.vz) * period
@@ -481,8 +507,7 @@ local function EvaluateGuards(blob)
 	for gi, guard in pairs(blob.guards) do
 		local unitID = guard.unitID
 		if guard.isCombatant and guard.speed > blob.speed then
-			local gx, gy, gz = Spring.GetUnitPosition(unitID)
-			guard.x, guard.y, guard.z = gx, gy, gz
+			local gx, gy, gz = GetUnitObjectPosition(guard)
 			local dist = Distance(blob.x, blob.z, gx, gz)
 			if dist > blob.radius + (blob.guardDistance * 3) then
 				if #blob.targets == 1 then
@@ -582,10 +607,8 @@ local function AssignCombat(blob)
 			elseif blob.willSlot[1] then
 				-- angle from a unit's position
 				local guard = blob.willSlot[1]
-				if guard.x == nil then
-					guard.x, guard.y, guard.z = Spring.GetUnitPosition(guard.unitID)
-				end
-				angle = AngleAtoB(blob.x, blob.z, guard.x, guard.z)
+				local gx, gy, gz = GetUnitObjectPosition(guard)
+				angle = AngleAtoB(blob.x, blob.z, gx, gz)
 			else
 				angle = random() * twicePi
 				blob.lastAngle = angle
@@ -659,6 +682,7 @@ local function AssignAssist(blob)
 		for i = 1, quota do
 			local guard = table.remove(blob.willAssist)
 			GiveCommand(guard.unitID, CMD.GUARD, {unitID})
+			if #blob.willAssist == 0 then break end
 		end
 		if #blob.willAssist == 0 then break end
 	end
@@ -677,6 +701,7 @@ local function AssignRepair(blob)
 		for i = 1, quota do
 			local guard = table.remove(blob.willRepair)
 			GiveCommand(guard.unitID, CMD.REPAIR, {unitID})
+			if #blob.willRepair == 0 then break end
 		end
 		if #blob.willRepair == 0 then break end
 	end
