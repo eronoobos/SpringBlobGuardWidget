@@ -227,12 +227,6 @@ local function GiveCommand(unitID, cmdID, cmdParams)
 		end
 	end
 	local guard = guards[unitID]
-	if guard then
-		local tID = NearestTargetID(guard)
-		local params = {0, CMD.GUARD, CMD.OPT_SHIFT, tID}
-		Spring.GiveOrderToUnit(unitID, CMD.INSERT, params, {"alt"})
-		widgetCommands[CommandString(CMD.GUARD, params, unitID)] = true
-	end
 	local insertParams = {0, cmdID, CMD.OPT_RIGHT }
 	for i = 1, #cmdParams do table.insert(insertParams, cmdParams[i]) end
 	local command = Spring.GiveOrderToUnit(unitID, CMD.INSERT, insertParams, {"alt"})
@@ -245,6 +239,12 @@ local function GiveCommand(unitID, cmdID, cmdParams)
 			else
 				-- guard has no target
 				guard.targetID = nil
+			end
+			if cmdID == CMD.MOVE then
+				local tID = NearestTargetID(guard)
+				local params = {1, CMD.GUARD, CMD.OPT_RIGHT, tID}
+				Spring.GiveOrderToUnit(unitID, CMD.INSERT, params, {"alt"})
+				widgetCommands[CommandString(CMD.GUARD, {tID}, unitID)] = true
 			end
 		end
 	end
@@ -567,7 +567,7 @@ local function SlotGuard(guard, blob, ax, az, guardDist)
 	if cmdQueue[1] then
 		if cmdQueue[1].id == CMD.ATTACK then attacking = true end
 	end
-	local maxDist = guard.size * 0.5
+	local maxDist = 40
 	if attacking then
 		if blob.underFire then
 			maxDist = ((guard.range * 0.5) + guard.speed) * 0.5
@@ -758,8 +758,8 @@ end
 
 function widget:KeyPress(key, mods, isRepeat) 
 	if (key == 0x067) and (not isRepeat) and (not mods.ctrl) and not (mods.shift) and (not mods.alt) then --g
-		local cmdDescs = Spring.GetActiveCmdDescs()
-		Spring.Echo(#cmdDescs)
+		-- local cmdDescs = Spring.GetActiveCmdDescs()
+		-- Spring.Echo(#cmdDescs)
 		--[[
 		for i, cmdDesc in pairs(cmdDescs) do
 			for k, v in pairs(cmdDesc) do
@@ -775,7 +775,7 @@ function widget:KeyPress(key, mods, isRepeat)
 		]]--
 		-- Spring.Echo("g")
 		-- Spring.SetActiveCommand("areaguard")
-		return true
+		-- return true
 	end
 	return false
 end
