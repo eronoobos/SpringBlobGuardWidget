@@ -370,6 +370,8 @@ end
 local function ResetCommands(unitID)
 	local guard = guards[unitID]
 	if guard == nil then return end
+	widgetRemoveCommands[unitID] = nil
+	widgetRemoveCommandsCount[unitID] = nil
 	Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {guard.initialMoveState}, {})
 end
 
@@ -815,7 +817,7 @@ end
 
 local cmdAreaGuard = {
 	id      = CMD_AREA_GUARD,
-	type    = CMDTYPE.ICON_UNIT_OR_AREA,
+	type    = CMDTYPE.ICON_AREA,
 	tooltip = 'Guard a unit or all units within a circle.',
 	name    = 'Area Guard',
 	cursor  = 'Guard',
@@ -838,30 +840,6 @@ function widget:CommandsChanged()
 			end
 		end
 	end
-end
-
-function widget:KeyPress(key, mods, isRepeat) 
-	--[[
-	if (key == 0x067) and (not isRepeat) and (not mods.ctrl) and not (mods.shift) and (not mods.alt) then --g
-		local cmdDescs = Spring.GetActiveCmdDescs()
-		Spring.Echo(#cmdDescs)
-		for i, cmdDesc in pairs(cmdDescs) do
-			for k, v in pairs(cmdDesc) do
-				Spring.Echo(k, v)
-				if k == "params" then
-					for kk, vv in pairs(v) do
-						Spring.Echo(kk, vv)
-					end
-				end
-			end
-			Spring.Echo(" ")
-		end
-		-- Spring.Echo("g")
-		-- Spring.SetActiveCommand("areaguard")
-		-- return true
-	end
-	]]--
-	return false
 end
 
 function widget:Initialize()
