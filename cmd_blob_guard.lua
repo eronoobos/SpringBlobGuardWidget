@@ -1017,7 +1017,7 @@ function widget:DrawWorldPreUnit()
 	gl.PushMatrix()
 	gl.DepthTest(true)
 	gl.LineWidth(1)
-	gl.Color(0, 0, 1, 0.33)
+	gl.Color(0, 0, 1, 0.5)
 	for bi, blob in pairs(blobs) do
 		if blob.x and blob.vx and blob.radius then
 			if Spring.IsSphereInView(blob.x, blob.y, blob.z, blob.radius) then
