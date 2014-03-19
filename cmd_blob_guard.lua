@@ -40,6 +40,9 @@ local blobs = {}
 local targets = {}
 local guards = {}
 local widgetCommands = {}
+local widgetInsertCommands = {}
+local widgetRemoveCommands = {}
+local widgetRemoveCommandsCount = {}
 local guardTargetQueue = {}
 local lastCalcFrame = 0
 
@@ -169,7 +172,7 @@ local function GetDefInfo(uDefID)
 	return info
 end
 
-local function CommandString(cmdID, cmdParams, unitID)
+local function CommandString(cmdID, cmdParams, unitID, extra)
 	local commandString = cmdID .. " "
 	local number = #cmdParams
 	for i = 1, number do 
@@ -178,6 +181,9 @@ local function CommandString(cmdID, cmdParams, unitID)
 	end
 	if unitID ~= nil then
 		commandString = commandString .. " " .. unitID
+	end
+	if extra ~= nil then
+		commandString = commandString .. " " .. extra
 	end
 	return commandString
 end
@@ -210,28 +216,119 @@ local function NearestTargetID(guard)
 	end
 end
 
-local function GiveCommand(unitID, cmdID, cmdParams)
-	local commands = Spring.GetUnitCommands(unitID)
-	if #commands > 0 then
-		local tagsToRemove = {}
-		for i = 1, #commands do
-			local command = commands[i]
-			local cmdString = CommandString(command.id, command.params, unitID)
-			if widgetCommands[cmdString] then
-				table.insert(tagsToRemove, command.tag)
-				widgetCommands[cmdString] = nil
-			end
+local function SetWidgetCommand(unitID, cmdID, cmdParams)
+	-- Spring.Echo("set widget command", unitID, cmdID)
+	local cmdString = CommandString(cmdID, cmdParams, unitID)
+	if widgetCommands[cmdString] == nil then
+		widgetCommands[cmdString] = 1
+	else
+		widgetCommands[cmdString] = widgetCommands[cmdString] + 1
+	end
+end
+
+local function ClearWidgetCommand(unitID, cmdID, cmdParams)
+	local cmdString = CommandString(cmdID, cmdParams, unitID)
+	if widgetCommands[cmdString] ~= nil then
+		-- Spring.Echo("clear widget command", unitID, cmdID)
+		widgetCommands[cmdString] = widgetCommands[cmdString] - 1
+		local number = widgetCommands[cmdString] + 0
+		if number == 0 then
+			widgetCommands[cmdString] = nil
 		end
-		for i = 1, #tagsToRemove do
-			Spring.GiveOrderToUnit(unitID, CMD.REMOVE, {tagsToRemove[i]}, {})
+		return number
+	else
+		return false
+	end
+end
+
+local function SendRemoveCommand(unitID, cmdTag)
+	-- Spring.Echo("send remove", unitID, cmdTag)
+	local given = Spring.GiveOrderToUnit(unitID, CMD.REMOVE, {cmdTag}, {})
+	if given == true then
+		if widgetRemoveCommands[unitID] == nil then
+			widgetRemoveCommands[unitID] = {}
+			widgetRemoveCommandsCount[unitID] = 0
+		end
+		widgetRemoveCommands[unitID][cmdTag] = 1
+		widgetRemoveCommandsCount[unitID] = widgetRemoveCommandsCount[unitID] + 1
+	end
+	return given
+end
+
+local function ReceiveRemoveCommand(unitID, cmdTag)
+	-- Spring.Echo("receive remove", unitID, cmdTag)
+	if widgetRemoveCommands[unitID] ~= nil then
+		widgetRemoveCommands[unitID][cmdTag] = 2
+	end
+end
+
+local function ClearRemoveCommand(unitID, cmdTag)
+	if widgetRemoveCommands[unitID] == nil then return false end
+	if widgetRemoveCommands[unitID][cmdTag] then
+		-- Spring.Echo("clear remove", unitID, cmdTag)
+		local state = widgetRemoveCommands[unitID][cmdTag] + 0
+		widgetRemoveCommands[unitID][cmdTag] = nil
+		widgetRemoveCommandsCount[unitID] = widgetRemoveCommandsCount[unitID] - 1
+		if widgetRemoveCommandsCount[unitID] == 0 then
+			widgetRemoveCommands[unitID] = nil
+			widgetRemoveCommandsCount[unitID] = nil
+		end
+		if state == 2 then
+			return true
+		else
+			return false
+		end
+	else
+		return false
+	end
+end
+
+local function SendInsertCommand(unitID, cmdID, cmdParams, number)
+	local insertParams = {number, cmdID, CMD.OPT_RIGHT}
+	for i = 1, #cmdParams do table.insert(insertParams, cmdParams[i]) end
+	local given = Spring.GiveOrderToUnit(unitID, CMD.INSERT, insertParams, {"alt"})
+	if given == true then
+		local cmdString = CommandString(cmdID, cmdParams, unitID, number)
+		-- Spring.Echo("insert successfully sent", cmdString)
+		if widgetInsertCommands[cmdString] == nil then
+			widgetInsertCommands[cmdString] = 1
+		else
+			widgetInsertCommands[cmdString] = widgetInsertCommands[cmdString] + 1
 		end
 	end
-	local guard = guards[unitID]
-	local insertParams = {0, cmdID, CMD.OPT_RIGHT }
-	for i = 1, #cmdParams do table.insert(insertParams, cmdParams[i]) end
-	local command = Spring.GiveOrderToUnit(unitID, CMD.INSERT, insertParams, {"alt"})
-	if command == true then
-		widgetCommands[CommandString(cmdID, cmdParams, unitID)] = true
+	return given
+end
+
+local function ClearInsertCommand(unitID, cmdID, cmdParams, number)
+	local cmdString = CommandString(cmdID, cmdParams, unitID, number)
+	if widgetInsertCommands[cmdString] ~= nil then
+		-- Spring.Echo("insert cleared!", cmdString)
+		widgetInsertCommands[cmdString] = widgetInsertCommands[cmdString] - 1
+		local number = widgetInsertCommands[cmdString] + 0
+		if number == 0 then
+			widgetInsertCommands[cmdString] = nil
+		end
+		return number
+	else
+		return false
+	end
+end
+
+local function GiveCommand(unitID, cmdID, cmdParams)
+	-- clear any current widget orders
+	local commands = Spring.GetUnitCommands(unitID)
+	if #commands > 0 then
+		for i = 1, #commands do
+			local command = commands[i]
+			if ClearWidgetCommand(unitID, command.id, command.params) then
+				SendRemoveCommand(unitID, command.tag)
+			end
+		end
+	end
+	-- insert the order
+	local sent = SendInsertCommand(unitID, cmdID, cmdParams, 0)
+	if sent == true then
+		local guard = guards[unitID]
 		if guard then
 			if (cmdID == CMD.GUARD or cmdID == CMD.REPAIR) and #cmdParams == 1 then
 				-- what guard is guarding or repairing
@@ -239,12 +336,6 @@ local function GiveCommand(unitID, cmdID, cmdParams)
 			else
 				-- guard has no target
 				guard.targetID = nil
-			end
-			if cmdID == CMD.MOVE then
-				local tID = NearestTargetID(guard)
-				local params = {1, CMD.GUARD, CMD.OPT_RIGHT, tID}
-				Spring.GiveOrderToUnit(unitID, CMD.INSERT, params, {"alt"})
-				widgetCommands[CommandString(CMD.GUARD, {tID}, unitID)] = true
 			end
 		end
 	end
@@ -280,18 +371,6 @@ local function ResetCommands(unitID)
 	local guard = guards[unitID]
 	if guard == nil then return end
 	Spring.GiveOrderToUnit(guard.unitID, CMD.MOVE_STATE, {guard.initialMoveState}, {})
-	--[[
-	if guard.waitBuffer then
-		local cmds = Spring.GetUnitCommands(unitID)
-		for i = 1, #cmds do
-			local cmd = cmds[i]
-			if cmd.id == CMD.WAIT then
-				Spring.GiveOrderToUnit(guard.unitID, CMD.REMOVE, {cmd.tag}, {})
-				break
-			end
-		end
-	end
-	]]--
 end
 
 local function ClearBlob(blob)
@@ -736,15 +815,11 @@ end
 
 local cmdAreaGuard = {
 	id      = CMD_AREA_GUARD,
-	type    = CMDTYPE.ICON_AREA,
-	tooltip = 'Guard all units within a circle.',
+	type    = CMDTYPE.ICON_UNIT_OR_AREA,
+	tooltip = 'Guard a unit or all units within a circle.',
 	name    = 'Area Guard',
 	cursor  = 'Guard',
 	action  = 'areaguard',
-	nwtext = CMD.GUARD,
-	netext = CMD.GUARD,
-	swtext = CMD.GUARD,
-	setext = CMD.GUARD,
 }
 
 
@@ -752,15 +827,24 @@ local cmdAreaGuard = {
 -- SPRING CALLINS
 
 function widget:CommandsChanged()
-	local customCommands = widgetHandler.customCommands
-	table.insert(customCommands, cmdAreaGuard)
+	local selected = Spring.GetSelectedUnits()
+	if #selected > 0 then
+		for i = 1, #selected do
+			local unitDef = UnitDefs[Spring.GetUnitDefID(selected[i])]
+			if unitDef["canGuard"] then
+				local customCommands = widgetHandler.customCommands
+				table.insert(customCommands, cmdAreaGuard)
+				return
+			end
+		end
+	end
 end
 
 function widget:KeyPress(key, mods, isRepeat) 
+	--[[
 	if (key == 0x067) and (not isRepeat) and (not mods.ctrl) and not (mods.shift) and (not mods.alt) then --g
-		-- local cmdDescs = Spring.GetActiveCmdDescs()
-		-- Spring.Echo(#cmdDescs)
-		--[[
+		local cmdDescs = Spring.GetActiveCmdDescs()
+		Spring.Echo(#cmdDescs)
 		for i, cmdDesc in pairs(cmdDescs) do
 			for k, v in pairs(cmdDesc) do
 				Spring.Echo(k, v)
@@ -772,11 +856,11 @@ function widget:KeyPress(key, mods, isRepeat)
 			end
 			Spring.Echo(" ")
 		end
-		]]--
 		-- Spring.Echo("g")
 		-- Spring.SetActiveCommand("areaguard")
 		-- return true
 	end
+	]]--
 	return false
 end
 
@@ -820,13 +904,20 @@ function widget:CommandNotify(cmdID, cmdParams, cmdOpts)
 end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdOpts, cmdParams, cmdTag)
-	if not interruptCmd[cmdID] then return end
-	-- check if this is a command issued from this widget
-	local cmdString = CommandString(cmdID, cmdParams, unitID)
-	if widgetCommands[cmdString] then
-		return
+	-- Spring.Echo(cmdID, cmdTag, cmdParams[1], cmdParams[2], cmdParams[3])
+	if cmdID == CMD.INSERT then
+		local actualParams = {}
+		for i = 4, #cmdParams do
+			table.insert(actualParams, cmdParams[i])
+		end
+		if ClearInsertCommand(unitID, cmdParams[2], actualParams, cmdParams[1]) then
+			SetWidgetCommand(unitID, cmdParams[2], actualParams)
+		end
 	end
-	-- below is not a widget command
+	if cmdID == CMD.REMOVE then
+		ReceiveRemoveCommand(unitID, cmdParams[1])
+	end
+	if not interruptCmd[cmdID] then return end
 	local shiftOpt = cmdOpts == CMD.OPT_SHIFT or cmdOpts == CMD.OPT_SHIFT + CMD.OPT_RIGHT
 	if cmdID == CMD.GUARD then
 		local currentCommand = true
@@ -841,15 +932,32 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdOpts, cmdPara
 			QueueGuardTargets(unitID, cmdID, cmdParams, {cmdParams[1]})
 		end
 	elseif cmdID ~= CMD_AREA_GUARD then
-		if not shiftOpt and guards[unitID] then
+		if not shiftOpt then
 			ClearGuard(unitID)
 		end
 	end
 end
 
 function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdTag, cmdParams, cmdOpts)
+	-- Spring.Echo(cmdID, cmdTag, cmdParams[1], cmdParams[2], cmdParams[3])
+	local removed = false
+	if ClearRemoveCommand(unitID, cmdTag) then
+		-- Spring.Echo("done because removed")
+		removed = true
+	end
+	local guard = guards[unitID]
+	if guard ~= nil then
+		if ClearWidgetCommand(unitID, cmdID, cmdParams) then
+			if #cmdParams == 3 and not removed then
+				-- insert a guard order following the move order
+				local tID = NearestTargetID(guard)
+				local params = {0, CMD.GUARD, CMD.OPT_RIGHT, tID}
+				SendInsertCommand(unitID, CMD.GUARD, {tID}, 0)
+			end
+		end
+	end
 	local guardTargets = guardTargetQueue[unitID]
-	if guardTargets then
+	if guardTargets ~= nil then
 		-- see if the current command is a guard command
 		local commands = Spring.GetUnitCommands(unitID)
 		if #commands == 0 then return end
@@ -869,10 +977,6 @@ function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdTag, cmdParam
 				guardTargetQueue[unitID] = nil
 			end
 		end
-	end
-	if guards[unitID] then
-		local cmdString = CommandString(cmdID, cmdParams, unitID)
-		widgetCommands[cmdString] = nil
 	end
 end
 
